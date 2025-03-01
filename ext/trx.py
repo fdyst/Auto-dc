@@ -23,10 +23,18 @@ class TransactionManager(commands.Cog):
         # Inisialisasi dengan instance bot
         self.balance_manager = BalanceManager(self.bot)
         self.product_manager = ProductManager(self.bot)
+        
+        # Print initialization info
+        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Current User's Login: {self.bot.user}")
 
     def _init_logger(self):
         self.logger = logging.getLogger("TransactionManager")
         self.logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
 
     async def process_purchase(self, user_id: int, product_code: str, 
                              quantity: int, growid: str) -> Tuple[bool, str, List[str]]:
@@ -35,7 +43,12 @@ class TransactionManager(commands.Cog):
         Returns: (success, message, items)
         """
         conn = None
+        total_price = 0
+        name = ""
         try:
+            # Log purchase attempt
+            self.logger.info(f"Purchase attempt - User: {user_id}, GrowID: {growid}, Product: {product_code}, Quantity: {quantity}")
+            
             conn = get_connection()
             cursor = conn.cursor()
 
@@ -47,16 +60,18 @@ class TransactionManager(commands.Cog):
                         AND s.status = ?) as stock
                 FROM products p 
                 WHERE p.code = ?
-                FOR UPDATE
             """, (STATUS_AVAILABLE, product_code))
 
             product = cursor.fetchone()
             if not product:
+                self.logger.warning(f"Product not found: {product_code}")
                 return False, "Product not found", []
 
             code, name, price, stock = product
+            self.logger.info(f"Product found - Name: {name}, Price: {price}, Stock: {stock}")
 
             if stock < quantity:
+                self.logger.warning(f"Insufficient stock - Required: {quantity}, Available: {stock}")
                 return False, f"Insufficient stock ({stock} available)", []
 
             total_price = price * quantity
@@ -64,26 +79,33 @@ class TransactionManager(commands.Cog):
             # Get current balance
             balance = await self.balance_manager.get_balance(growid)
             if not balance:
+                self.logger.warning(f"Balance not found for GrowID: {growid}")
                 return False, "Could not get your balance", []
+
+            self.logger.info(f"Current balance for {growid}: {balance.format()}")
 
             # Check if enough balance
             if balance.total_wls < total_price:
+                self.logger.warning(f"Insufficient balance - Required: {total_price}, Available: {balance.total_wls}")
                 return False, f"Insufficient balance. Need {total_price:,} WLs", []
 
             # Get available stock
             available_stock = await self.product_manager.get_available_stock(code, quantity)
             if len(available_stock) < quantity:
+                self.logger.warning(f"Stock not available - Required: {quantity}, Available: {len(available_stock)}")
                 return False, "Stock not available", []
 
             # Update balance
             try:
-                await self.balance_manager.update_balance(
+                new_balance = await self.balance_manager.update_balance(
                     growid,
                     wl=-total_price,
                     details=f"Purchase: {name} x{quantity}",
                     transaction_type=TRANSACTION_PURCHASE
                 )
+                self.logger.info(f"Balance updated - New balance: {new_balance.format()}")
             except ValueError as e:
+                self.logger.error(f"Balance update failed: {e}")
                 return False, str(e), []
 
             # Mark stock as used with transaction tracking
@@ -126,26 +148,29 @@ class TransactionManager(commands.Cog):
 
             conn.commit()
             self.logger.info(
-                f"Purchase successful: {growid} bought {quantity}x {name} "
-                f"for {total_price} WLs at {transaction_time}"
+                f"Purchase successful - User: {user_id}, GrowID: {growid}, "
+                f"Product: {name}, Quantity: {quantity}, Price: {total_price} WLs"
             )
             return True, success_msg, items
 
         except Exception as e:
             if conn:
                 conn.rollback()
-            self.logger.error(f"Error processing purchase: {e}")
+            self.logger.error(f"Error processing purchase: {e}", exc_info=True)
             # Try to refund if balance was deducted
             try:
-                await self.balance_manager.update_balance(
-                    growid,
-                    wl=total_price,
-                    details=f"Refund: Failed purchase of {name} x{quantity}",
-                    transaction_type=TRANSACTION_REFUND
-                )
+                if total_price > 0:
+                    await self.balance_manager.update_balance(
+                        growid,
+                        wl=total_price,
+                        details=f"Refund: Failed purchase of {name} x{quantity}",
+                        transaction_type=TRANSACTION_REFUND
+                    )
+                    self.logger.info(f"Refund processed for {growid}: {total_price} WLs")
             except Exception as refund_error:
-                self.logger.error(f"Failed to process refund: {refund_error}")
+                self.logger.error(f"Failed to process refund: {refund_error}", exc_info=True)
             raise
+
         finally:
             if conn:
                 conn.close()
