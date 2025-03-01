@@ -154,7 +154,7 @@ class DonateHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         response = (
-            f"✅ Donation received!\n"
+            f"\u2705 Donation received!\n"
             f"GrowID: {growid}\n"
             f"Amount: {wl} WL, {dl} DL, {bgl} BGL\n"
             f"New Balance:\n{new_balance.format()}"
@@ -164,7 +164,7 @@ class DonateHandler(BaseHTTPRequestHandler):
     def send_error_response(self, message: str):
         self.send_response(400)
         self.end_headers()
-        self.wfile.write(f"❌ Error: {message}".encode())
+        self.wfile.write(f"\u274c Error: {message}".encode())
 
     async def log_to_discord(
         self, 
@@ -180,7 +180,7 @@ class DonateHandler(BaseHTTPRequestHandler):
             return
             
         embed = discord.Embed(
-            title="💎 New Donation Received",
+            title="\ud83d\udc8e New Donation Received",
             color=discord.Color.green(),
             timestamp=datetime.utcnow()
         )
@@ -194,9 +194,9 @@ class DonateHandler(BaseHTTPRequestHandler):
         embed.add_field(
             name="Amount",
             value=(
-                f"• {wl:,} WL\n"
-                f"• {dl:,} DL\n"
-                f"• {bgl:,} BGL"
+                f"\u2022 {wl:,} WL\n"
+                f"\u2022 {dl:,} DL\n"
+                f"\u2022 {bgl:,} BGL"
             ),
             inline=True
         )
