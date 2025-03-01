@@ -112,119 +112,98 @@ class AdminCog(commands.Cog, name="Admin"):
             self.logger.error(f"Error adding product: {e}")
 
     @commands.command(name="bulkstock")
-    async def bulk_add_stock(self, ctx):
-        """Add stock from attached file"""
+    async def bulk_stock(self, ctx, product_code: str = None):
+        """Add bulk stock from file for specified product code"""
         if not await self._check_admin(ctx):
             return
-
+            
+        if not product_code:
+            await ctx.send("❌ Please specify a product code! Usage: `!bulkstock <product_code>`")
+            return
+    
         if not ctx.message.attachments:
-            embed = discord.Embed(
-                title="❌ Missing File",
-                description="Please attach a .txt file\n\n"
-                          "Example usage:\n"
-                          "1. Type `!bulkstock`\n"
-                          "2. Attach any .txt file (stock.txt, items.txt, etc)\n"
-                          "3. Send the message",
-                color=discord.Color.red()
-            )
-            await ctx.send(embed=embed)
+            await ctx.send("❌ Please attach a text file containing the stock items!")
             return
-
-        try:
-            # Process bulk stock using ProductManager
-            embed, success = await self.product_manager.process_bulk_stock(
-                ctx.message.attachments[0],
-                ctx.author
-            )
-            await ctx.send(embed=embed)
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error in bulk stock: {e}")
-
-    @commands.command(name="editproduct")
-    async def edit_product(self, ctx, code: str, field: str, *, value: str):
-        """Edit product details"""
-        if not await self._check_admin(ctx):
+    
+        attachment = ctx.message.attachments[0]
+        if not attachment.filename.endswith('.txt'):
+            await ctx.send("❌ Please attach a .txt file!")
             return
-            
+    
         try:
-            # Convert price to integer if editing price
-            if field.lower() == 'price':
-                try:
-                    value = int(value)
-                except ValueError:
-                    await ctx.send("❌ Price must be a number!")
-                    return
-
-            # Update product using ProductManager
-            result = await self.product_manager.update_product(code, **{field.lower(): value})
+            # Read file content
+            stock_content = await attachment.read()
+            stock_text = stock_content.decode('utf-8')
             
-            embed = discord.Embed(title="✅ Product Updated", color=discord.Color.green())
-            embed.add_field(name="Code", value=code, inline=True)
-            embed.add_field(name="Field", value=field, inline=True)
-            embed.add_field(name="New Value", value=str(value), inline=True)
-            embed.set_footer(text=f"Updated by {ctx.author}")
+            # Split into lines and remove empty lines
+            lines = [line.strip() for line in stock_text.split('\n') if line.strip()]
             
-            await ctx.send(embed=embed)
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error editing product: {e}")
-
-    @commands.command(name="deleteproduct")
-    async def delete_product(self, ctx, code: str):
-        """Delete a product"""
-        if not await self._check_admin(ctx):
-            return
-
-        try:
-            # Get product details first
-            product = await self.product_manager.get_product(code)
-            if not product:
-                await ctx.send(f"❌ Product {code} not found!")
+            if not lines:
+                await ctx.send("❌ The file is empty!")
                 return
-
-            # Ask for confirmation
-            confirm_msg = await ctx.send(
-                f"⚠️ Are you sure you want to delete {code} ({product['name']})?\n"
-                f"This action cannot be undone!"
-            )
-            await confirm_msg.add_reaction('✅')
-            await confirm_msg.add_reaction('❌')
-
-            def check(reaction, user):
-                return user == ctx.author and str(reaction.emoji) in ['✅', '❌']
-
+    
+            successful = 0
+            failed = 0
+                
             try:
-                reaction, user = await self.bot.wait_for(
-                    'reaction_add', 
-                    timeout=30.0, 
-                    check=check
+                # Verify product exists using product_manager
+                product = await self.product_manager.get_product(product_code.upper())
+                if not product:
+                    await ctx.send(f"❌ Product code `{product_code}` not found!")
+                    return
+    
+                for i, line in enumerate(lines, 1):
+                    try:
+                        # Get only the first part before | as content
+                        content = line.split('|')[0].strip()
+                        
+                        if not content:
+                            failed += 1
+                            continue
+    
+                        # Use product_manager to add stock
+                        success = await self.product_manager.add_stock(
+                            product_code=product_code.upper(),
+                            content=content,
+                            added_by=str(ctx.author),
+                            line_number=i
+                        )
+                        
+                        if success:
+                            successful += 1
+                        else:
+                            failed += 1
+    
+                    except Exception as e:
+                        self.logger.error(f"Error processing line {i}: {e}")
+                        failed += 1
+                        continue
+                
+                embed = discord.Embed(
+                    title="✅ Stock Processing Complete",
+                    color=discord.Color.green(),
+                    timestamp=datetime.utcnow()
                 )
-            except TimeoutError:
-                await ctx.send("❌ Operation timed out!")
-                return
-
-            if str(reaction.emoji) == '❌':
-                await ctx.send("❌ Operation cancelled!")
-                return
-
-            # Delete product using ProductManager
-            await self.product_manager.delete_product(code)
-            
-            embed = discord.Embed(
-                title="✅ Product Deleted",
-                description=f"Product {code} ({product['name']}) has been deleted.",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text=f"Deleted by {ctx.author}")
-            
-            await ctx.send(embed=embed)
-            
+                embed.add_field(
+                    name="Product Code",
+                    value=f"`{product_code.upper()}`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Results",
+                    value=f"✅ Added: {successful}\n❌ Failed: {failed}",
+                    inline=False
+                )
+                
+                await ctx.send(embed=embed)
+                    
+            except Exception as e:
+                self.logger.error(f"Error verifying product: {e}")
+                await ctx.send(f"❌ Error verifying product: {str(e)}")
+                
         except Exception as e:
-            await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error deleting product: {e}")
+            self.logger.error(f"Error processing bulk stock: {e}")
+            await ctx.send(f"❌ Error processing file: {str(e)}")
 
     @commands.command(name="addbalance")
     async def add_balance(self, ctx, growid: str, amount: int, currency: str):
@@ -258,39 +237,6 @@ class AdminCog(commands.Cog, name="Admin"):
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
             self.logger.error(f"Error adding balance: {e}")
-
-    @commands.command(name="removebalance")
-    async def remove_balance(self, ctx, growid: str, amount: int, currency: str):
-        """Remove balance from user"""
-        if not await self._check_admin(ctx):
-            return
-            
-        try:
-            currency = currency.upper()
-            if currency not in CURRENCY_RATES:
-                await ctx.send(f"❌ Invalid currency. Use: {', '.join(CURRENCY_RATES.keys())}")
-                return
-
-            kwargs = {currency.lower(): -amount}
-            new_balance = await self.balance_manager.update_balance(
-                growid,
-                transaction_type="ADMIN_REMOVE",
-                details=f"Removed by admin {ctx.author}",
-                **kwargs
-            )
-
-            embed = discord.Embed(title="✅ Balance Removed", color=discord.Color.red())
-            embed.add_field(name="GrowID", value=growid, inline=True)
-            embed.add_field(name="Removed", value=f"{amount:,} {currency}", inline=True)
-            embed.add_field(name="New Balance", value=new_balance.format(), inline=False)
-            embed.set_footer(text=f"Removed by {ctx.author}")
-
-            await ctx.send(embed=embed)
-            self.logger.info(f"Balance removed from user {growid}")
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error removing balance: {e}")
 
     @commands.command(name="checkbalance")
     async def check_balance(self, ctx, growid: str):
