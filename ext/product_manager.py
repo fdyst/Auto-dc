@@ -1,41 +1,23 @@
 import logging
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from database import get_connection
 from discord.ext import commands
-from ext.constants import (
-    STATUS_AVAILABLE, 
-    STATUS_SOLD,
-    TRANSACTION_PURCHASE,
-    TRANSACTION_REFUND,
-    TransactionError
-)
+from .constants import STATUS_AVAILABLE, STATUS_SOLD
 
 class ProductManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._init_logger()
-        
-        # Import BalanceManager di sini untuk menghindari circular import
-        from .balance_manager import BalanceManager
-        
-        # Inisialisasi dengan instance bot
-        self.balance_manager = BalanceManager(self.bot)
-        
-        # Print initialization info
-        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Current User's Login: {self.bot.user}")
-
-    def _init_logger(self):
         self.logger = logging.getLogger("ProductManager")
-        self.logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
 
-    async def create_product(self, code: str, name: str, price: int, description: Optional[str] = None) -> Dict:
+    async def create_product(
+        self, 
+        code: str, 
+        name: str, 
+        price: int, 
+        description: Optional[str] = None
+    ) -> Dict:
         """Create a new product"""
         conn = None
         try:
@@ -75,18 +57,22 @@ class ProductManager(commands.Cog):
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT code, name, price, description
-                FROM products
-                WHERE code = ?
-            """, (code.upper(),))
+                SELECT p.code, p.name, p.price, p.description,
+                       (SELECT COUNT(*) FROM stock s 
+                        WHERE s.product_code = p.code 
+                        AND s.status = ?) as stock_count
+                FROM products p
+                WHERE p.code = ?
+            """, (STATUS_AVAILABLE, code.upper()))
             
             product = cursor.fetchone()
             if product:
                 return {
-                    'code': product[0],
-                    'name': product[1],
-                    'price': product[2],
-                    'description': product[3]
+                    'code': product['code'],
+                    'name': product['name'],
+                    'price': product['price'],
+                    'description': product['description'],
+                    'stock': product['stock_count']
                 }
             return None
 
@@ -98,23 +84,27 @@ class ProductManager(commands.Cog):
                 conn.close()
 
     async def get_all_products(self) -> List[Dict]:
-        """Get all products"""
+        """Get all products with their stock count"""
         conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT code, name, price, description
-                FROM products
-                ORDER BY name
-            """)
+                SELECT p.code, p.name, p.price, p.description,
+                       (SELECT COUNT(*) FROM stock s 
+                        WHERE s.product_code = p.code 
+                        AND s.status = ?) as stock_count
+                FROM products p
+                ORDER BY p.name
+            """, (STATUS_AVAILABLE,))
             
             return [{
-                'code': row[0],
-                'name': row[1],
-                'price': row[2],
-                'description': row[3]
+                'code': row['code'],
+                'name': row['name'],
+                'price': row['price'],
+                'description': row['description'],
+                'stock': row['stock_count']
             } for row in cursor.fetchall()]
 
         except Exception as e:
@@ -132,16 +122,18 @@ class ProductManager(commands.Cog):
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT id, content
+                SELECT id, content, added_at
                 FROM stock
                 WHERE product_code = ?
                 AND status = ?
+                ORDER BY added_at ASC
                 LIMIT ?
             """, (product_code.upper(), STATUS_AVAILABLE, quantity))
             
             return [{
-                'id': row[0],
-                'content': row[1]
+                'id': row['id'],
+                'content': row['content'],
+                'added_at': row['added_at']
             } for row in cursor.fetchall()]
 
         except Exception as e:
@@ -151,26 +143,157 @@ class ProductManager(commands.Cog):
             if conn:
                 conn.close()
 
-    async def mark_stock_used(self, stock_id: int, buyer_id: str, seller_id: Optional[str] = None) -> bool:
+    async def add_stock(self, product_code: str, contents: List[str], added_by: str) -> int:
+        """Add stock items for a product"""
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # Check if product exists
+            cursor.execute("SELECT code FROM products WHERE code = ?", (product_code.upper(),))
+            if not cursor.fetchone():
+                raise ValueError(f"Product {product_code} does not exist")
+
+            # Begin transaction
+            conn.execute("BEGIN TRANSACTION")
+            
+            added_count = 0
+            for content in contents:
+                try:
+                    cursor.execute("""
+                        INSERT INTO stock 
+                        (product_code, content, added_by, status)
+                        VALUES (?, ?, ?, ?)
+                    """, (product_code.upper(), content.strip(), added_by, STATUS_AVAILABLE))
+                    added_count += 1
+                except sqlite3.IntegrityError:
+                    self.logger.warning(f"Duplicate stock content: {content}")
+                    continue
+
+            conn.commit()
+            return added_count
+
+        except Exception as e:
+            self.logger.error(f"Error adding stock: {e}")
+            if conn:
+                conn.rollback()
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+    async def mark_stock_used(
+        self, 
+        stock_id: int, 
+        buyer_id: str, 
+        seller_id: Optional[str] = None
+    ) -> bool:
         """Mark stock as used"""
         conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
+            current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            
             cursor.execute("""
                 UPDATE stock
                 SET status = ?, 
                     buyer_id = ?,
-                    seller_id = ?
+                    seller_id = ?,
+                    used_at = ?
                 WHERE id = ? AND status = ?
-            """, (STATUS_SOLD, buyer_id, seller_id, stock_id, STATUS_AVAILABLE))
+            """, (STATUS_SOLD, buyer_id, seller_id, current_time, stock_id, STATUS_AVAILABLE))
             
             conn.commit()
-            return cursor.rowcount > 0
+            success = cursor.rowcount > 0
+            
+            if success:
+                self.logger.info(
+                    f"Stock {stock_id} marked as sold to {buyer_id}"
+                    + (f" by {seller_id}" if seller_id else "")
+                )
+            else:
+                self.logger.warning(f"Failed to mark stock {stock_id} as used")
+                
+            return success
 
         except Exception as e:
             self.logger.error(f"Error marking stock used: {e}")
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                conn.close()
+
+    async def get_stock_info(self, stock_id: int) -> Optional[Dict]:
+        """Get detailed information about a stock item"""
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT s.*, p.name as product_name, p.price
+                FROM stock s
+                JOIN products p ON s.product_code = p.code
+                WHERE s.id = ?
+            """, (stock_id,))
+            
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row['id'],
+                    'product_code': row['product_code'],
+                    'product_name': row['product_name'],
+                    'content': row['content'],
+                    'status': row['status'],
+                    'price': row['price'],
+                    'buyer_id': row['buyer_id'],
+                    'seller_id': row['seller_id'],
+                    'added_by': row['added_by'],
+                    'added_at': row['added_at'],
+                    'used_at': row['used_at']
+                }
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting stock info: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+    async def delete_product(self, code: str) -> bool:
+        """Delete a product and its stock"""
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # Begin transaction
+            conn.execute("BEGIN TRANSACTION")
+            
+            # Delete product (cascade will handle stock)
+            cursor.execute(
+                "DELETE FROM products WHERE code = ?", 
+                (code.upper(),)
+            )
+            
+            success = cursor.rowcount > 0
+            if success:
+                conn.commit()
+                self.logger.info(f"Product {code} deleted successfully")
+            else:
+                conn.rollback()
+                self.logger.warning(f"Product {code} not found")
+            
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Error deleting product: {e}")
             if conn:
                 conn.rollback()
             return False
