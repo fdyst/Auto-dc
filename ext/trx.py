@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from database import get_connection
 from discord.ext import commands
-from ext.constants import (
+from .constants import (
     STATUS_AVAILABLE, 
     STATUS_SOLD,
     TRANSACTION_PURCHASE,
@@ -15,169 +15,130 @@ from ext.constants import (
 class TransactionManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._init_logger()
+        self.logger = logging.getLogger("TransactionManager")
         
-        # Import BalanceManager dan ProductManager di sini untuk menghindari circular import
+        # Import managers here to avoid circular imports
         from .balance_manager import BalanceManager
         from .product_manager import ProductManager
         
-        # Inisialisasi dengan instance bot
-        self.balance_manager = BalanceManager(self.bot)
-        self.product_manager = ProductManager(self.bot)
-        
-        # Print initialization info
-        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Current User's Login: {self.bot.user}")
+        self.balance_manager = BalanceManager(bot)
+        self.product_manager = ProductManager(bot)
 
-    def _init_logger(self):
-        self.logger = logging.getLogger("TransactionManager")
-        self.logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
-
-    async def process_purchase(self, user_id: int, product_code: str, 
-                               quantity: int, growid: str) -> Tuple[bool, str, List[str]]:
-        """
-        Process a purchase transaction
-        Returns: (success, message, items)
-        """
+    async def process_purchase(
+        self, 
+        discord_id: int, 
+        product_code: str, 
+        quantity: int
+    ) -> Tuple[bool, str, List[str]]:
+        """Process a purchase transaction"""
         conn = None
-        total_price = 0
-        name = ""
         try:
-            # Log purchase attempt
-            self.logger.info(f"Purchase attempt - User: {user_id}, GrowID: {growid}, Product: {product_code}, Quantity: {quantity}")
-            
-            conn = get_connection()
-            cursor = conn.cursor()
+            # Get user's GrowID
+            growid = await self.balance_manager.get_growid(discord_id)
+            if not growid:
+                return False, "You need to set your GrowID first!", []
 
-            # Get product details with proper status check
-            cursor.execute("""
-                SELECT p.code, p.name, p.price, 
-                       (SELECT COUNT(*) FROM stock s 
-                        WHERE s.product_code = p.code 
-                        AND s.status = ?) as stock
-                FROM products p 
-                WHERE p.code = ?
-            """, (STATUS_AVAILABLE, product_code))
-
-            product = cursor.fetchone()
+            # Get product details
+            product = await self.product_manager.get_product(product_code)
             if not product:
-                self.logger.warning(f"Product not found: {product_code}")
                 return False, "Product not found", []
 
-            code, name, price, stock = product
-            self.logger.info(f"Product found - Name: {name}, Price: {price}, Stock: {stock}")
+            total_price = product['price'] * quantity
 
-            if stock < quantity:
-                self.logger.warning(f"Insufficient stock - Required: {quantity}, Available: {stock}")
-                return False, f"Insufficient stock ({stock} available)", []
+            # Check stock availability
+            available_stock = await self.product_manager.get_available_stock(
+                product_code, 
+                quantity
+            )
+            if len(available_stock) < quantity:
+                return False, f"Insufficient stock ({len(available_stock)} available)", []
 
-            total_price = price * quantity
-
-            # Get current balance
+            # Get and check balance
             balance = await self.balance_manager.get_balance(growid)
             if not balance:
-                self.logger.warning(f"Balance not found for GrowID: {growid}")
                 return False, "Could not get your balance", []
 
-            self.logger.info(f"Current balance for {growid}: {balance.format()}")
-
-            # Check if enough balance
             if balance.total_wls < total_price:
-                self.logger.warning(f"Insufficient balance - Required: {total_price}, Available: {balance.total_wls}")
-                return False, f"Insufficient balance. Need {total_price:,} WLs", []
+                return False, f"Insufficient balance (need {total_price:,} WLs)", []
 
-            # Get available stock
-            available_stock = await self.product_manager.get_available_stock(code, quantity)
-            if len(available_stock) < quantity:
-                self.logger.warning(f"Stock not available - Required: {quantity}, Available: {len(available_stock)}")
-                return False, "Stock not available", []
+            # Begin purchase process
+            conn = get_connection()
+            conn.execute("BEGIN TRANSACTION")
 
             # Update balance
             try:
                 new_balance = await self.balance_manager.update_balance(
                     growid,
                     wl=-total_price,
-                    details=f"Purchase: {name} x{quantity}",
+                    details=f"Purchase: {product['name']} x{quantity}",
                     transaction_type=TRANSACTION_PURCHASE
                 )
-                self.logger.info(f"Balance updated - New balance: {new_balance.format()}")
             except ValueError as e:
-                self.logger.error(f"Balance update failed: {e}")
                 return False, str(e), []
 
-            # Mark stock as used with transaction tracking
+            # Mark items as sold
             items = []
-            transaction_time = datetime.utcnow()
-            
-            for stock_item in available_stock:
+            for stock in available_stock[:quantity]:
                 success = await self.product_manager.mark_stock_used(
-                    stock_item['id'], 
+                    stock['id'],
                     buyer_id=growid,
-                    seller_id=str(user_id)
+                    seller_id=str(discord_id)
                 )
                 if not success:
-                    raise TransactionError(f"Failed to mark stock {stock_item['id']} as used")
-                items.append(stock_item['content'])
+                    raise TransactionError(f"Failed to mark stock {stock['id']} as used")
+                items.append(stock['content'])
 
             # Record transaction details
+            cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO transactions (
-                    growid, type, details, old_balance, new_balance, 
+                    growid, type, details, old_balance, new_balance,
                     items_count, total_price, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (
-                growid, 
+                growid,
                 TRANSACTION_PURCHASE,
-                f"Purchase: {name} x{quantity}",
-                str(balance.format()),
-                str((balance.total_wls - total_price)),
+                f"Purchase: {product['name']} x{quantity}",
+                balance.format(),
+                new_balance.format(),
                 quantity,
-                total_price,
-                transaction_time
+                total_price
             ))
 
-            # Create success message
+            conn.commit()
+
             success_msg = (
-                f"Successfully purchased {quantity}x {name}\n"
+                f"✅ Purchase successful!\n"
+                f"Product: {product['name']} x{quantity}\n"
                 f"Total Price: {total_price:,} WLs\n"
+                f"New Balance: {new_balance.format()}\n"
                 f"Items will be sent via DM"
             )
 
-            conn.commit()
-            self.logger.info(
-                f"Purchase successful - User: {user_id}, GrowID: {growid}, "
-                f"Product: {name}, Quantity: {quantity}, Price: {total_price} WLs"
-            )
             return True, success_msg, items
+
+        except TransactionError as e:
+            if conn:
+                conn.rollback()
+            self.logger.error(f"Transaction error: {e}")
+            return False, str(e), []
 
         except Exception as e:
             if conn:
                 conn.rollback()
-            self.logger.error(f"Error processing purchase: {e}", exc_info=True)
-            # Try to refund if balance was deducted
-            try:
-                if total_price > 0:
-                    await self.balance_manager.update_balance(
-                        growid,
-                        wl=total_price,
-                        details=f"Refund: Failed purchase of {name} x{quantity}",
-                        transaction_type=TRANSACTION_REFUND
-                    )
-                    self.logger.info(f"Refund processed for {growid}: {total_price} WLs")
-            except Exception as refund_error:
-                self.logger.error(f"Failed to process refund: {refund_error}", exc_info=True)
-            raise
+            self.logger.error(f"Error processing purchase: {e}")
+            return False, "An error occurred during purchase", []
 
         finally:
             if conn:
                 conn.close()
 
-    async def get_recent_transactions(self, growid: str, limit: int = 5) -> List[Dict]:
-        """Get recent transactions for a user"""
+    async def get_transaction_history(
+        self, 
+        growid: str, 
+        limit: int = 10
+    ) -> List[Dict]:
+        """Get transaction history for a user"""
         conn = None
         try:
             conn = get_connection()
@@ -185,66 +146,30 @@ class TransactionManager(commands.Cog):
 
             cursor.execute("""
                 SELECT 
-                    type, 
-                    details, 
-                    created_at,
+                    type,
+                    details,
+                    old_balance,
+                    new_balance,
                     items_count,
-                    total_price
+                    total_price,
+                    created_at
                 FROM transactions
                 WHERE growid = ?
                 ORDER BY created_at DESC
                 LIMIT ?
-            """, (growid, limit))
+            """, (growid.upper(), limit))
 
             return [{
-                'type': row[0],
-                'details': row[1],
+                'type': row['type'],
+                'details': row['details'],
+                'old_balance': row['old_balance'],
+                'new_balance': row['new_balance'],
+                'items_count': row['items_count'],
+                'total_price': row['total_price'],
                 'created_at': datetime.strptime(
-                    row[2], '%Y-%m-%d %H:%M:%S'
-                ).strftime('%Y-%m-%d %H:%M'),
-                'items_count': row[3],
-                'total_price': row[4]
-            } for row in cursor.fetchall()]
-
-        except Exception as e:
-            self.logger.error(f"Error getting transactions: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
-
-    async def get_transaction_history(self, growid: str, limit: int = 10) -> List[Dict]:
-        """Get detailed transaction history"""
-        conn = None
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT 
-                    type, 
-                    old_balance, 
-                    new_balance, 
-                    details, 
-                    created_at,
-                    items_count,
-                    total_price
-                FROM transactions
-                WHERE growid = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-            """, (growid, limit))
-
-            return [{
-                'type': row[0],
-                'old_balance': row[1],
-                'new_balance': row[2],
-                'details': row[3],
-                'timestamp': datetime.strptime(
-                    row[4], '%Y-%m-%d %H:%M:%S'
-                ).strftime('%Y-%m-%d %H:%M'),
-                'items_count': row[5],
-                'total_price': row[6]
+                    row['created_at'], 
+                    '%Y-%m-%d %H:%M:%S'
+                ).strftime('%Y-%m-%d %H:%M')
             } for row in cursor.fetchall()]
 
         except Exception as e:
