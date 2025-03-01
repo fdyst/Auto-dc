@@ -1,14 +1,15 @@
 import logging
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from database import get_connection
 from discord.ext import commands
 from ext.constants import (
     STATUS_AVAILABLE, 
     STATUS_SOLD,
     TRANSACTION_PURCHASE,
-    TRANSACTION_REFUND
+    TRANSACTION_REFUND,
+    TransactionError
 )
 
 class TransactionManager(commands.Cog):
@@ -32,12 +33,12 @@ class TransactionManager(commands.Cog):
         self.logger = logging.getLogger("TransactionManager")
         self.logger.setLevel(logging.INFO)
         handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
 
     async def process_purchase(self, user_id: int, product_code: str, 
-                             quantity: int, growid: str) -> Tuple[bool, str, List[str]]:
+                               quantity: int, growid: str) -> Tuple[bool, str, List[str]]:
         """
         Process a purchase transaction
         Returns: (success, message, items)
@@ -119,7 +120,7 @@ class TransactionManager(commands.Cog):
                     seller_id=str(user_id)
                 )
                 if not success:
-                    raise Exception(f"Failed to mark stock {stock_item['id']} as used")
+                    raise TransactionError(f"Failed to mark stock {stock_item['id']} as used")
                 items.append(stock_item['content'])
 
             # Record transaction details
