@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from ext.product_manager import ProductManager
 from ext.balance_manager import BalanceManager
 from ext.trx import TransactionManager
-from ext.constants import CURRENCY_RATES, MAX_ITEMS_PER_MESSAGE
+from ext.constants import CURRENCY_RATES, MAX_ITEMS_PER_MESSAGE, STATUS_AVAILABLE, STATUS_SOLD
 
 # Set up logging
 logging.basicConfig(
@@ -30,7 +30,6 @@ UPDATE_INTERVAL = 55
 def format_datetime() -> str:
     """Get current datetime in UTC"""
     return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-
 class BuyModal(Modal, title="Buy Product"):
     def __init__(self, bot):
         super().__init__()
@@ -60,15 +59,24 @@ class BuyModal(Modal, title="Buy Product"):
         
         self.add_item(self.product_code)
         self.add_item(self.quantity)
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
             
-            # Get GrowID first
-            growid = await self.balance_manager.get_growid(interaction.user.id)
-            if not growid:
+            # Get GrowID first with error handling
+            try:
+                growid = await self.balance_manager.get_growid(interaction.user.id)
+                if not growid:
+                    await interaction.followup.send(
+                        "❌ Please set your GrowID first!", 
+                        ephemeral=True
+                    )
+                    return
+            except Exception as e:
+                self.logger.error(f"Error getting GrowID: {e}")
                 await interaction.followup.send(
-                    "❌ Please set your GrowID first!", 
+                    "❌ Error retrieving GrowID.", 
                     ephemeral=True
                 )
                 return
@@ -91,63 +99,69 @@ class BuyModal(Modal, title="Buy Product"):
 
             product_code = self.product_code.value.upper()
             
-            # Process purchase
-            success, message, items = await self.trx_manager.process_purchase(
-                growid,
-                product_code,
-                quantity
-            )
+            # Process purchase with detailed error handling
+            try:
+                success, message, items = await self.trx_manager.process_purchase(
+                    growid,
+                    product_code,
+                    quantity
+                )
 
-            if not success:
+                if not success:
+                    await interaction.followup.send(
+                        f"❌ {message}", 
+                        ephemeral=True
+                    )
+                    return
+
+                # Get updated balance
+                new_balance = await self.balance_manager.get_balance(growid)
+
+                # Create success embed
+                embed = discord.Embed(
+                    title="✅ Purchase Successful",
+                    color=discord.Color.green(),
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(
+                    name="Transaction Details",
+                    value=message,
+                    inline=False
+                )
+                if new_balance:
+                    embed.add_field(
+                        name="New Balance",
+                        value=new_balance.format(),
+                        inline=False
+                    )
+
+                # Send items via DM
+                if items:
+                    try:
+                        items_text = "\n".join(items)
+                        dm_embed = discord.Embed(
+                            title="🎉 Your Items",
+                            description=f"```\n{items_text}\n```",
+                            color=discord.Color.gold()
+                        )
+                        await interaction.user.send(embed=dm_embed)
+                    except discord.Forbidden:
+                        embed.add_field(
+                            name="⚠️ Warning",
+                            value="Could not send items via DM. Please enable DMs!",
+                            inline=False
+                        )
+
+                await interaction.followup.send(embed=embed, ephemeral=True)
+
+            except Exception as e:
+                self.logger.error(f"Error processing purchase: {e}")
                 await interaction.followup.send(
-                    f"❌ {message}", 
+                    "❌ Error processing purchase.", 
                     ephemeral=True
                 )
                 return
 
-            # Get updated balance
-            new_balance = await self.balance_manager.get_balance(growid)
-            
-            # Create success embed
-            embed = discord.Embed(
-                title="✅ Purchase Successful",
-                color=discord.Color.green(),
-                timestamp=datetime.utcnow()
-            )
-            embed.add_field(
-                name="Transaction Details",
-                value=message,
-                inline=False
-            )
-            if new_balance:
-                embed.add_field(
-                    name="New Balance",
-                    value=new_balance.format(),
-                    inline=False
-                )
-
-            # Try to send items via DM
-            if items:
-                try:
-                    items_text = "\n".join(items)
-                    dm_embed = discord.Embed(
-                        title="🎉 Your Items",
-                        description=f"```\n{items_text}\n```",
-                        color=discord.Color.gold()
-                    )
-                    await interaction.user.send(embed=dm_embed)
-                except discord.Forbidden:
-                    embed.add_field(
-                        name="⚠️ Warning",
-                        value="Could not send items via DM. Please enable DMs!",
-                        inline=False
-                    )
-
-            await interaction.followup.send(
-                embed=embed, 
-                ephemeral=True
-            )
-            
         except Exception as e:
             self.logger.error(f"Error in BuyModal: {e}")
             if not interaction.response.is_done():
@@ -161,6 +175,18 @@ class BuyModal(Modal, title="Buy Product"):
                     ephemeral=True
                 )
 
+        except Exception as e:
+            self.logger.error(f"Error in BuyModal: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ An error occurred during purchase.", 
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ An error occurred during purchase.", 
+                    ephemeral=True
+                )
 class SetGrowIDModal(Modal, title="Set GrowID"):
     def __init__(self, bot):
         super().__init__()
@@ -245,54 +271,76 @@ class StockView(View):
         self._init_buttons()
 
     def _init_buttons(self):
-        try:
-            self.clear_items()
-            
-            # Define button data
-            buttons = [
-                ("balance", "Check Balance", "💰", discord.ButtonStyle.secondary),
-                ("buy", "Buy", "🛒", discord.ButtonStyle.primary),
-                ("set_growid", "Set GrowID", "📝", discord.ButtonStyle.success),
-                ("check_growid", "Check GrowID", "🔍", discord.ButtonStyle.secondary),
-                ("world", "World Info", "🌍", discord.ButtonStyle.secondary)
-            ]
-            
-            # Create and add buttons
-            for custom_id, label, emoji, style in buttons:
-                button = Button(
-                    custom_id=f"button_{custom_id}",
-                    label=label,
-                    emoji=emoji,
-                    style=style
-                )
-                button.callback = getattr(self, f"button_{custom_id}_callback")
-                self.add_item(button)
-                
-            self.logger.info("Buttons initialized successfully")
-        except Exception as e:
-            self.logger.error(f"Error initializing buttons: {e}")
-            raise
+        """Initialize view buttons"""
+        # Balance Button
+        self.balance_button = Button(
+            style=discord.ButtonStyle.primary,
+            label="Check Balance",
+            emoji="💰",
+            custom_id="balance"
+        )
+        self.balance_button.callback = self.button_balance_callback
+
+        # Buy Button
+        self.buy_button = Button(
+            style=discord.ButtonStyle.success,
+            label="Buy Product",
+            emoji="🛒",
+            custom_id="buy"
+        )
+        self.buy_button.callback = self.button_buy_callback
+
+        # Set GrowID Button
+        self.set_growid_button = Button(
+            style=discord.ButtonStyle.secondary,
+            label="Set GrowID",
+            emoji="📝",
+            custom_id="set_growid"
+        )
+        self.set_growid_button.callback = self.button_set_growid_callback
+
+        # Check GrowID Button
+        self.check_growid_button = Button(
+            style=discord.ButtonStyle.secondary,
+            label="Check GrowID",
+            emoji="🔍",
+            custom_id="check_growid"
+        )
+        self.check_growid_button.callback = self.button_check_growid_callback
+
+        # World Info Button
+        self.world_button = Button(
+            style=discord.ButtonStyle.primary,
+            label="World Info",
+            emoji="🌍",
+            custom_id="world"
+        )
+        self.world_button.callback = self.button_world_callback
+
+        # Add buttons to view
+        self.add_item(self.balance_button)
+        self.add_item(self.buy_button)
+        self.add_item(self.set_growid_button)
+        self.add_item(self.check_growid_button)
+        self.add_item(self.world_button)
 
     async def _check_cooldown(self, interaction: discord.Interaction) -> bool:
         """Check if user is on cooldown"""
-        try:
-            user_id = interaction.user.id
-            current_time = datetime.utcnow().timestamp()
-            
-            if user_id in self._cooldowns:
-                time_diff = current_time - self._cooldowns[user_id]
-                if time_diff < COOLDOWN_SECONDS:
-                    await interaction.response.send_message(
-                        f"⚠️ Please wait {COOLDOWN_SECONDS - int(time_diff)} seconds before using buttons again.",
-                        ephemeral=True
-                    )
-                    return False
-                    
-            self._cooldowns[user_id] = current_time
-            return True
-        except Exception as e:
-            self.logger.error(f"Error checking cooldown: {e}")
-            return False
+        user_id = interaction.user.id
+        now = datetime.utcnow().timestamp()
+        
+        if user_id in self._cooldowns:
+            last_use = self._cooldowns[user_id]
+            if now - last_use < COOLDOWN_SECONDS:
+                remaining = int(COOLDOWN_SECONDS - (now - last_use))
+                await interaction.response.send_message(
+                    f"⏳ Please wait {remaining} seconds before using this again.",
+                    ephemeral=True
+                )
+                return False
+                
+        self._cooldowns[user_id] = now
+        return True
 
     async def button_balance_callback(self, interaction: discord.Interaction):
         """Handle balance button click"""
@@ -311,17 +359,22 @@ class StockView(View):
                 )
                 return
 
-            # Get balance
-            balance = await self.balance_manager.get_balance(growid)
-            if not balance:
+            # Get balance with error handling
+            try:
+                balance = await self.balance_manager.get_balance(growid)
+                if not balance:
+                    await interaction.followup.send(
+                        "❌ Balance not found!", 
+                        ephemeral=True
+                    )
+                    return
+            except Exception as e:
+                self.logger.error(f"Error getting balance: {e}")
                 await interaction.followup.send(
-                    "❌ Balance not found!", 
+                    "❌ Error retrieving balance.", 
                     ephemeral=True
                 )
                 return
-
-            # Get recent transactions
-            transactions = await self.trx_manager.get_recent_transactions(growid, limit=5)
 
             embed = discord.Embed(
                 title="💰 Balance Information",
@@ -334,17 +387,6 @@ class StockView(View):
                 value=balance.format(), 
                 inline=False
             )
-
-            if transactions:
-                transactions_text = "\n".join([
-                    f"• {tx['type']}: {tx['details']} ({tx['created_at']})"
-                    for tx in transactions
-                ])
-                embed.add_field(
-                    name="Recent Transactions",
-                    value=transactions_text,
-                    inline=False
-                )
             
             await interaction.followup.send(
                 embed=embed, 
