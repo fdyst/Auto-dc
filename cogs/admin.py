@@ -393,8 +393,8 @@ class AdminCog(commands.Cog, name="Admin"):
 
     # Fitur Admin Baru
 
-    @commands.command(name="botinfo")
-    async def bot_info(self, ctx):
+    @commands.command(name="systeminfo")  # Ubah nama command dari "botinfo" menjadi "systeminfo"
+    async def system_info(self, ctx):
         """Show bot system information"""
         if not await self._check_admin(ctx):
             return
