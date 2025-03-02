@@ -1,18 +1,113 @@
-import logging
-import asyncio
-import time
-from typing import Dict, Optional
-from datetime import datetime
-
-import discord
-from discord.ext import commands, tasks
+import discord 
 from discord import ui
-from discord.ui import Button, View
+from discord.ext import commands, tasks
+from discord.ui import Button, Modal, TextInput, View
+import logging
+from datetime import datetime
+import asyncio
+import json
+import time
+from typing import Optional, Dict, Any
 
-from .constants import COOLDOWN_SECONDS, UPDATE_INTERVAL, CACHE_TIMEOUT
-from .balance_manager import BalanceManagerService
-from .product_manager import ProductManagerService
-from .trx import TransactionManager
+from ext.product_manager import ProductManagerService
+from ext.balance_manager import BalanceManagerService
+from ext.trx import TransactionManager
+from ext.constants import (
+    STATUS_AVAILABLE, 
+    STATUS_SOLD,
+    TRANSACTION_PURCHASE,
+    COOLDOWN_SECONDS,
+    UPDATE_INTERVAL,
+    CACHE_TIMEOUT
+)
+
+# Setup logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Load config
+with open('config.json') as config_file:
+    config = json.load(config_file)
+    LIVE_STOCK_CHANNEL_ID = int(config['id_live_stock'])
+
+class LiveStockService:
+    _instance = None
+
+    def __new__(cls, bot):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.initialized = False
+        return cls._instance
+
+    def __init__(self, bot):
+        if not self.initialized:
+            self.bot = bot
+            self.logger = logging.getLogger("LiveStockService")
+            self.product_manager = ProductManagerService(bot)
+            self._cache = {}
+            self._cache_timeout = CACHE_TIMEOUT
+            self.initialized = True
+
+    def _get_cached(self, key: str):
+        if key in self._cache:
+            data = self._cache[key]
+            if time.time() - data['timestamp'] < self._cache_timeout:
+                return data['value']
+            del self._cache[key]
+        return None
+
+    def _set_cached(self, key: str, value):
+        self._cache[key] = {
+            'value': value,
+            'timestamp': time.time()
+        }
+
+    async def create_stock_embed(self, products: list) -> discord.Embed:
+        cache_key = f"stock_embed_{hash(str(products))}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        embed = discord.Embed(
+            title="🏪 Store Stock Status",
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+
+        if products:
+            for product in sorted(products, key=lambda x: x['code']):
+                stock_count = await self.product_manager.get_stock_count(product['code'])
+                value = (
+                    f"💎 Code: `{product['code']}`\n"
+                    f"📦 Stock: `{stock_count}`\n"
+                    f"💰 Price: `{product['price']:,} WL`\n"
+                )
+                if product.get('description'):
+                    value += f"📝 Info: {product['description']}\n"
+                
+                embed.add_field(
+                    name=f"🔸 {product['name']} 🔸",
+                    value=value,
+                    inline=False
+                )
+        else:
+            embed.description = "No products available."
+
+        embed.set_footer(text=f"Last Update: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        
+        self._set_cached(cache_key, embed)
+        return embed
+
+    async def cleanup(self):
+        """Cleanup resources"""
+        self._cache.clear()
 
 class BuyModal(ui.Modal, title="Buy Product"):
     def __init__(self, bot):
@@ -141,40 +236,7 @@ class StockView(View):
         self._cooldowns = {}
         self._interaction_locks = {}
         self.logger = logging.getLogger("StockView")
-        self._init_buttons()
         self._cache_cleanup.start()
-
-    def _init_buttons(self):
-        self.add_item(Button(
-            style=discord.ButtonStyle.primary,
-            emoji="💰",
-            label="Balance",
-            custom_id="button_balance"
-        ))
-        self.add_item(Button(
-            style=discord.ButtonStyle.success,
-            emoji="🛒",
-            label="Buy",
-            custom_id="button_buy"
-        ))
-        self.add_item(Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="🔑",
-            label="Set GrowID",
-            custom_id="button_set_growid"
-        ))
-        self.add_item(Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="🔍",
-            label="Check GrowID",
-            custom_id="button_check_growid"
-        ))
-        self.add_item(Button(
-            style=discord.ButtonStyle.secondary,
-            emoji="🌍",
-            label="World",
-            custom_id="button_world"
-        ))
 
     @tasks.loop(minutes=5)
     async def _cache_cleanup(self):
@@ -225,7 +287,12 @@ class StockView(View):
         except Exception as e:
             self.logger.error(f"Error sending interaction response: {e}")
 
-    @discord.ui.button(custom_id="button_balance")
+    @discord.ui.button(
+        label="Balance",
+        emoji="💰",
+        style=discord.ButtonStyle.primary,
+        custom_id="balance:1"
+    )
     async def button_balance_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_cooldown(interaction) or not await self._check_interaction_lock(interaction):
             return
@@ -257,7 +324,12 @@ class StockView(View):
             self.logger.error(f"Error in balance callback: {e}")
             await interaction.followup.send("❌ An error occurred", ephemeral=True)
 
-    @discord.ui.button(custom_id="button_buy")
+    @discord.ui.button(
+        label="Buy",
+        emoji="🛒",
+        style=discord.ButtonStyle.success,
+        custom_id="buy:1"
+    )
     async def button_buy_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_cooldown(interaction) or not await self._check_interaction_lock(interaction):
             return
@@ -282,7 +354,12 @@ class StockView(View):
                 ephemeral=True
             )
 
-    @discord.ui.button(custom_id="button_set_growid")
+    @discord.ui.button(
+        label="Set GrowID",
+        emoji="🔑",
+        style=discord.ButtonStyle.secondary,
+        custom_id="set_growid:1"
+    )
     async def button_set_growid_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_cooldown(interaction) or not await self._check_interaction_lock(interaction):
             return
@@ -299,7 +376,12 @@ class StockView(View):
                 ephemeral=True
             )
 
-    @discord.ui.button(custom_id="button_check_growid")
+    @discord.ui.button(
+        label="Check GrowID",
+        emoji="🔍",
+        style=discord.ButtonStyle.secondary,
+        custom_id="check_growid:1"
+    )
     async def button_check_growid_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_cooldown(interaction) or not await self._check_interaction_lock(interaction):
             return
@@ -325,7 +407,12 @@ class StockView(View):
             self.logger.error(f"Error in check growid callback: {e}")
             await interaction.followup.send("❌ An error occurred", ephemeral=True)
 
-    @discord.ui.button(custom_id="button_world")
+    @discord.ui.button(
+        label="World",
+        emoji="🌍",
+        style=discord.ButtonStyle.secondary,
+        custom_id="world:1"
+    )
     async def button_world_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_cooldown(interaction) or not await self._check_interaction_lock(interaction):
             return
@@ -368,22 +455,28 @@ class LiveStock(commands.Cog):
             self._task = None
             
             bot.add_view(self.stock_view)
-            self.live_stock.start()
             bot.live_stock_instance = self
-            
-            self.logger.info(f"LiveStock cog initialized at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+    async def cog_load(self):
+        """Called when cog is being loaded"""
+        self.live_stock.start()
+        self.logger.info("LiveStock cog loaded and task started")
 
     def cog_unload(self):
-        if self._task:
+        """Called when cog is being unloaded"""
+        if self._task and not self._task.done():
             self._task.cancel()
-        self.live_stock.cancel()
+        if hasattr(self, 'live_stock') and self.live_stock.is_running():
+            self.live_stock.cancel()
+        self.logger.info("LiveStock cog unloaded")
 
     @tasks.loop(seconds=UPDATE_INTERVAL)
     async def live_stock(self):
         async with self.update_lock:
             try:
-                channel = self.bot.get_channel(int(self.bot.config['stock_channel_id']))
+                channel = self.bot.get_channel(LIVE_STOCK_CHANNEL_ID)
                 if not channel:
+                    self.logger.error(f"Could not find channel with ID {LIVE_STOCK_CHANNEL_ID}")
                     return
 
                 products = await self.service.product_manager.get_all_products()
@@ -392,14 +485,13 @@ class LiveStock(commands.Cog):
                 if self.message_id:
                     try:
                         message = await channel.fetch_message(self.message_id)
-                        await message.edit(embed=embed)
-                    except:
-                        # Message not found, create new
+                        await message.edit(embed=embed, view=self.stock_view)
+                        self.logger.debug(f"Updated existing message {self.message_id}")
+                    except discord.NotFound:
                         message = await channel.send(embed=embed, view=self.stock_view)
                         self.message_id = message.id
-                        self.logger.info(f"Created new stock message {self.message_id}")
+                        self.logger.info(f"Created new message {self.message_id} (old not found)")
                 else:
-                    # First time, create message
                     message = await channel.send(embed=embed, view=self.stock_view)
                     self.message_id = message.id
                     self.logger.info(f"Created initial message {self.message_id}")
@@ -413,81 +505,11 @@ class LiveStock(commands.Cog):
     async def before_live_stock(self):
         await self.bot.wait_until_ready()
 
-class LiveStockService:
-    _instance = None
-
-    def __new__(cls, bot):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance.initialized = False
-        return cls._instance
-
-    def __init__(self, bot):
-        if not self.initialized:
-            self.bot = bot
-            self.logger = logging.getLogger("LiveStockService")
-            self.product_manager = ProductManagerService(bot)
-            self._cache = {}
-            self._cache_timeout = CACHE_TIMEOUT
-            self.initialized = True
-
-    def _get_cached(self, key: str):
-        if key in self._cache:
-            data = self._cache[key]
-            if time.time() - data['timestamp'] < self._cache_timeout:
-                return data['value']
-            del self._cache[key]
-        return None
-
-    def _set_cached(self, key: str, value):
-        self._cache[key] = {
-            'value': value,
-            'timestamp': time.time()
-        }
-
-    async def create_stock_embed(self, products: list) -> discord.Embed:
-        cache_key = f"stock_embed_{hash(str(products))}"
-        cached = self._get_cached(cache_key)
-        if cached:
-            return cached
-
-        embed = discord.Embed(
-            title="🏪 Store Stock Status",
-            color=discord.Color.blue(),
-            timestamp=datetime.utcnow()
-        )
-
-        if products:
-            for product in sorted(products, key=lambda x: x['code']):
-                stock_count = await self.product_manager.get_stock_count(product['code'])
-                value = (
-                    f"💎 Code: `{product['code']}`\n"
-                    f"📦 Stock: `{stock_count}`\n"
-                    f"💰 Price: `{product['price']:,} WL`\n"
-                )
-                if product.get('description'):
-                    value += f"📝 Info: {product['description']}\n"
-                
-                embed.add_field(
-                    name=f"🔸 {product['name']} 🔸",
-                    value=value,
-                    inline=False
-                )
-        else:
-            embed.description = "No products available."
-
-        embed.set_footer(text=f"Last Update: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        
-        self._set_cached(cache_key, embed)
-        return embed
-
-    async def cleanup(self):
-        """Cleanup resources"""
-        self._cache.clear()
-
 async def setup(bot):
     """Setup the LiveStock cog"""
-    if not hasattr(bot, 'live_stock_cog_loaded'):
+    try:
         await bot.add_cog(LiveStock(bot))
-        bot.live_stock_cog_loaded = True
-        logging.info(f'LiveStock cog loaded successfully at {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC')
+        logger.info(f'LiveStock cog loaded successfully at {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC')
+    except Exception as e:
+        logger.error(f"Error loading LiveStock cog: {e}")
+        raise
