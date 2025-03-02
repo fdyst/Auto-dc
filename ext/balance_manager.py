@@ -21,6 +21,16 @@ class BalanceManagerService:
             self.logger = logging.getLogger("BalanceManagerService")
             self._cache = {}
             self.initialized = True
+            self.logger.info("BalanceManagerService initialized")
+
+    def clear_cache(self, growid: str = None):
+        """Clear balance cache"""
+        if growid:
+            self._cache.pop(growid, None)
+            self.logger.debug(f"Cleared cache for GrowID: {growid}")
+        else:
+            self._cache.clear()
+            self.logger.debug("Cleared all cache")
 
     async def register_user(self, discord_id: int, growid: str) -> bool:
         """Register or update user's GrowID"""
@@ -45,6 +55,8 @@ class BalanceManagerService:
             """, (str(discord_id), growid.upper()))
             
             conn.commit()
+            # Clear cache for this user
+            self.clear_cache(growid.upper())
             self.logger.info(f"Registered Discord user {discord_id} with GrowID {growid}")
             return True
 
@@ -70,6 +82,11 @@ class BalanceManagerService:
             """, (str(discord_id),))
             
             result = cursor.fetchone()
+            if result:
+                self.logger.info(f"Found GrowID for Discord ID {discord_id}: {result['growid']}")
+            else:
+                self.logger.info(f"No GrowID found for Discord ID {discord_id}")
+                
             return result['growid'] if result else None
 
         except Exception as e:
@@ -79,9 +96,15 @@ class BalanceManagerService:
             if conn:
                 conn.close()
 
+    async def has_growid(self, discord_id: int) -> bool:
+        """Check if user has registered GrowID"""
+        growid = await self.get_growid(discord_id)
+        return growid is not None
+
     async def get_balance(self, growid: str) -> Optional[Balance]:
         """Get user balance"""
         if growid in self._cache:
+            self.logger.debug(f"Retrieved balance from cache for GrowID: {growid}")
             return self._cache[growid]
 
         conn = None
@@ -102,7 +125,10 @@ class BalanceManagerService:
                     result['balance_bgl']
                 )
                 self._cache[growid] = balance
+                self.logger.debug(f"Retrieved and cached balance for GrowID: {growid}")
                 return balance
+            
+            self.logger.info(f"No balance found for GrowID: {growid}")
             return None
 
         except Exception as e:
@@ -179,7 +205,9 @@ class BalanceManagerService:
             ))
 
             conn.commit()
+            # Update cache
             self._cache[growid] = new_balance
+            self.logger.info(f"Updated balance for {growid}: {old_balance.format()} -> {new_balance.format()}")
             return new_balance
 
         except Exception as e:
@@ -190,13 +218,6 @@ class BalanceManagerService:
         finally:
             if conn:
                 conn.close()
-
-    def clear_cache(self, growid: str = None):
-        """Clear balance cache"""
-        if growid:
-            self._cache.pop(growid, None)
-        else:
-            self._cache.clear()
 
 class BalanceManager(commands.Cog):
     """Cog for balance management commands"""
@@ -215,7 +236,18 @@ class BalanceManager(commands.Cog):
         """Cleanup when cog is unloaded"""
         if self._task and not self._task.done():
             self._task.cancel()
+        # Clear cache on unload
+        if hasattr(self, 'manager'):
+            self.manager.clear_cache()
         self.logger.info("BalanceManager cog unloaded")
+        
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Handler for when bot is ready"""
+        # Clear cache on bot ready
+        if hasattr(self, 'manager'):
+            self.manager.clear_cache()
+        self.logger.info("BalanceManager is ready")
 
 async def setup(bot):
     """Setup the BalanceManager cog"""
