@@ -298,8 +298,8 @@ class StockView(View):
             return
 
         try:
-            has_growid = await self.balance_manager.has_growid(interaction.user.id)
-            if not has_growid:
+            growid = await self.balance_manager.get_growid(interaction.user.id)
+            if not growid:
                 await interaction.response.send_message(
                     "❌ Please set your GrowID first!", 
                     ephemeral=True
