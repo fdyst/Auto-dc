@@ -6,10 +6,20 @@ from database import get_connection
 from discord.ext import commands
 from .constants import STATUS_AVAILABLE, STATUS_SOLD
 
-class ProductManager(commands.Cog):
+class ProductManagerService:
+    """Service class for handling product operations"""
+    _instance = None
+
+    def __new__(cls, bot):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self, bot):
-        self.bot = bot
-        self.logger = logging.getLogger("ProductManager")
+        if not hasattr(self, 'initialized'):
+            self.bot = bot
+            self.logger = logging.getLogger("ProductManagerService")
+            self.initialized = True
 
     async def create_product(
         self, 
@@ -37,7 +47,7 @@ class ProductManager(commands.Cog):
                 'price': price,
                 'description': description
             }
-
+    
         except sqlite3.IntegrityError:
             raise ValueError(f"Product code {code} already exists!")
         except Exception as e:
@@ -114,7 +124,11 @@ class ProductManager(commands.Cog):
             if conn:
                 conn.close()
 
-    async def get_available_stock(self, product_code: str, quantity: int) -> List[Dict]:
+    async def get_available_stock(
+        self, 
+        product_code: str, 
+        quantity: int
+    ) -> List[Dict]:
         """Get available stock for a product"""
         conn = None
         try:
@@ -143,7 +157,12 @@ class ProductManager(commands.Cog):
             if conn:
                 conn.close()
 
-    async def add_stock(self, product_code: str, contents: List[str], added_by: str) -> int:
+    async def add_stock(
+        self, 
+        product_code: str, 
+        contents: List[str], 
+        added_by: str
+    ) -> int:
         """Add stock items for a product"""
         conn = None
         try:
@@ -151,7 +170,10 @@ class ProductManager(commands.Cog):
             cursor = conn.cursor()
             
             # Check if product exists
-            cursor.execute("SELECT code FROM products WHERE code = ?", (product_code.upper(),))
+            cursor.execute(
+                "SELECT code FROM products WHERE code = ?", 
+                (product_code.upper(),)
+            )
             if not cursor.fetchone():
                 raise ValueError(f"Product {product_code} does not exist")
 
@@ -234,7 +256,6 @@ class ProductManager(commands.Cog):
         try:
             conn = get_connection()
             cursor = conn.cursor()
-            
             cursor.execute("""
                 SELECT s.*, p.name as product_name, p.price
                 FROM stock s
@@ -301,5 +322,85 @@ class ProductManager(commands.Cog):
             if conn:
                 conn.close()
 
+    async def update_product(
+        self, 
+        code: str, 
+        updates: Dict
+    ) -> bool:
+        """Update product details"""
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            # Prepare update query
+            update_fields = []
+            params = []
+            for key, value in updates.items():
+                if key in ['name', 'price', 'description']:
+                    update_fields.append(f"{key} = ?")
+                    params.append(value)
+
+            if not update_fields:
+                return False
+
+            # Add product code to params
+            params.append(code.upper())
+
+            # Execute update
+            query = f"""
+                UPDATE products 
+                SET {', '.join(update_fields)}
+                WHERE code = ?
+            """
+            cursor.execute(query, params)
+            
+            success = cursor.rowcount > 0
+            if success:
+                conn.commit()
+                self.logger.info(f"Product {code} updated successfully")
+            else:
+                conn.rollback()
+                self.logger.warning(f"Product {code} not found")
+
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Error updating product: {e}")
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                conn.close()
+
+class ProductManager(commands.Cog):
+    """Cog for product management commands"""
+    def __init__(self, bot):
+        self.bot = bot
+        self.logger = logging.getLogger("ProductManager")
+        self._task = None
+        self.manager = ProductManagerService(bot)
+
+        # Flag untuk mencegah duplikasi
+        if not hasattr(bot, 'product_manager_initialized'):
+            bot.product_manager_initialized = True
+            self.logger.info("ProductManager cog initialized")
+
+    def cog_unload(self):
+        """Cleanup when cog is unloaded"""
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self.logger.info("ProductManager cog unloaded")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Handler for when bot is ready"""
+        self.logger.info("ProductManager is ready")
+
 async def setup(bot):
-    await bot.add_cog(ProductManager(bot))
+    """Setup the ProductManager cog"""
+    if not hasattr(bot, 'product_manager_loaded'):
+        await bot.add_cog(ProductManager(bot))
+        bot.product_manager_loaded = True
+        logging.info('ProductManager cog loaded successfully')
