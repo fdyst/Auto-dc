@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import time
+import io
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -28,11 +29,48 @@ class TransactionManager:
             self._locks = {}
             self.initialized = True
 
-    # ... (kode TransactionManager yang sama seperti sebelumnya) ...
     async def _get_lock(self, key: str) -> asyncio.Lock:
         if key not in self._locks:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
+
+    async def send_purchase_result(self, user: discord.User, items: list, product_name: str) -> bool:
+        """
+        Mengirim hasil pembelian ke user via DM dalam bentuk txt
+        Returns:
+            bool: True jika berhasil mengirim DM, False jika gagal
+        """
+        try:
+            # Buat konten file txt
+            content = f"Purchase Result for {user.name}\n"
+            content += f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+            content += f"Product: {product_name}\n"
+            content += "-" * 50 + "\n\n"
+            
+            # Tambahkan semua item yang dibeli
+            for idx, item in enumerate(items, 1):
+                content += f"Item {idx}:\n{item['content']}\n\n"
+            
+            # Buat file txt
+            file = discord.File(
+                io.StringIO(content),
+                filename=f"result_{user.name}.txt"
+            )
+            
+            # Kirim DM ke user
+            await user.send(
+                "Here is your purchase result:",
+                file=file
+            )
+            self.logger.info(f"Purchase result sent to user {user.name} ({user.id})")
+            return True
+            
+        except discord.Forbidden:
+            self.logger.warning(f"Cannot send DM to user {user.name} ({user.id})")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error sending purchase result to {user.name} ({user.id}): {e}")
+            return False
 
     async def process_purchase(self, growid: str, product_code: str, quantity: int = 1) -> Optional[Dict]:
         async with await self._get_lock(f"purchase_{growid}_{product_code}"):
@@ -43,7 +81,7 @@ class TransactionManager:
                 
                 # Get product details
                 cursor.execute(
-                    "SELECT price FROM products WHERE code = ?",
+                    "SELECT price, name FROM products WHERE code = ?",  # Tambahkan name ke query
                     (product_code.upper(),)
                 )
                 product = cursor.fetchone()
@@ -116,7 +154,8 @@ class TransactionManager:
                     'success': True,
                     'items': [dict(item) for item in stock_items],
                     'total_price': total_price,
-                    'new_balance': new_balance
+                    'new_balance': new_balance,
+                    'product_name': product['name']  # Tambahkan nama produk ke hasil
                 }
 
             except Exception as e:
