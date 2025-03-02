@@ -45,10 +45,10 @@ def setup_database():
             END;
         """)
 
-        # Create user_growid table
+        # Create user_growid table dengan schema baru
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_growid (
-                user_id INTEGER PRIMARY KEY,
+                discord_id TEXT PRIMARY KEY,
                 growid TEXT UNIQUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (growid) REFERENCES users(growid) ON DELETE CASCADE
@@ -114,6 +114,8 @@ def setup_database():
                 details TEXT,
                 old_balance TEXT,
                 new_balance TEXT,
+                items_count INTEGER DEFAULT 0,
+                total_price INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (growid) REFERENCES users(growid) ON DELETE CASCADE
             )
@@ -154,6 +156,7 @@ def setup_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_growid ON transactions(growid)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_growid_growid ON user_growid(growid)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_growid_discord ON user_growid(discord_id)")
 
         conn.commit()
         logging.info("Database setup completed successfully")
@@ -167,10 +170,66 @@ def setup_database():
         if conn:
             conn.close()
 
+def migrate_database():
+    """Migrate existing database to new schema"""
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Check if old table exists
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='user_growid' 
+            AND sql LIKE '%user_id INTEGER%'
+        """)
+
+        if cursor.fetchone():
+            # Backup old table
+            cursor.execute("ALTER TABLE user_growid RENAME TO user_growid_old")
+
+            # Create new table with correct schema
+            cursor.execute("""
+                CREATE TABLE user_growid (
+                    discord_id TEXT PRIMARY KEY,
+                    growid TEXT UNIQUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (growid) REFERENCES users(growid) ON DELETE CASCADE
+                )
+            """)
+
+            # Copy data with conversion
+            cursor.execute("""
+                INSERT INTO user_growid (discord_id, growid, created_at)
+                SELECT CAST(user_id as TEXT), growid, created_at 
+                FROM user_growid_old
+            """)
+
+            # Create new index
+            cursor.execute("CREATE INDEX idx_user_growid_discord ON user_growid(discord_id)")
+
+            # Drop old table
+            cursor.execute("DROP TABLE user_growid_old")
+
+            conn.commit()
+            logging.info("Database migration completed successfully")
+        else:
+            logging.info("No migration needed - database schema is up to date")
+
+    except sqlite3.Error as e:
+        logging.error(f"Database migration error: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     setup_database()
+    migrate_database()
     logging.info("Database initialization complete")
