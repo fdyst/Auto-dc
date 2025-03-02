@@ -3,32 +3,24 @@ import logging
 from datetime import datetime
 from typing import Optional, Dict
 from database import get_connection
-from .constants import CURRENCY_RATES
 from discord.ext import commands
+from .constants import Balance, CURRENCY_RATES
 
-class Balance:
-    def __init__(self, wl: int = 0, dl: int = 0, bgl: int = 0):
-        self.wl = wl
-        self.dl = dl
-        self.bgl = bgl
+class BalanceManagerService:
+    """Service class for handling balance operations"""
+    _instance = None
 
-    @property
-    def total_wls(self) -> int:
-        return self.wl + (self.dl * CURRENCY_RATES['DL']) + (self.bgl * CURRENCY_RATES['BGL'])
+    def __new__(cls, bot):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
-    def format(self) -> str:
-        return (
-            f"💎 BGLs: {self.bgl:,}\n"
-            f"💜 DLs: {self.dl:,}\n"
-            f"💚 WLs: {self.wl:,}\n"
-            f"Total in WLs: {self.total_wls:,}"
-        )
-
-class BalanceManager(commands.Cog):
     def __init__(self, bot):
-        self.bot = bot
-        self.logger = logging.getLogger("BalanceManager")
-        self._cache = {}
+        if not hasattr(self, 'initialized'):
+            self.bot = bot
+            self.logger = logging.getLogger("BalanceManagerService")
+            self._cache = {}
+            self.initialized = True
 
     async def register_user(self, discord_id: int, growid: str) -> bool:
         """Register or update user's GrowID"""
@@ -121,8 +113,11 @@ class BalanceManager(commands.Cog):
                 conn.close()
 
     async def update_balance(
-        self, growid: str, 
-        wl: int = 0, dl: int = 0, bgl: int = 0,
+        self, 
+        growid: str, 
+        wl: int = 0, 
+        dl: int = 0, 
+        bgl: int = 0,
         details: str = "", 
         transaction_type: str = "UPDATE"
     ) -> Balance:
@@ -203,14 +198,28 @@ class BalanceManager(commands.Cog):
         else:
             self._cache.clear()
 
-    async def has_growid(self, discord_id: int) -> bool:
-        """Check if user has registered GrowID"""
-        try:
-            growid = await self.get_growid(discord_id)
-            return growid is not None
-        except Exception as e:
-            self.logger.error(f"Error checking GrowID: {e}")
-            return False
+class BalanceManager(commands.Cog):
+    """Cog for balance management commands"""
+    def __init__(self, bot):
+        self.bot = bot
+        self.logger = logging.getLogger("BalanceManager")
+        self._task = None
+        self.manager = BalanceManagerService(bot)
+
+        # Flag untuk mencegah duplikasi
+        if not hasattr(bot, 'balance_manager_initialized'):
+            bot.balance_manager_initialized = True
+            self.logger.info("BalanceManager cog initialized")
+
+    def cog_unload(self):
+        """Cleanup when cog is unloaded"""
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self.logger.info("BalanceManager cog unloaded")
 
 async def setup(bot):
-    await bot.add_cog(BalanceManager(bot))
+    """Setup the BalanceManager cog"""
+    if not hasattr(bot, 'balance_manager_loaded'):
+        await bot.add_cog(BalanceManager(bot))
+        bot.balance_manager_loaded = True
+        logging.info('BalanceManager cog loaded successfully')
