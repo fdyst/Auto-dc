@@ -1,29 +1,20 @@
+import discord
 from collections import namedtuple
 
-# Currency rates
-CURRENCY_RATES = {
-    'WL': 1,
-    'DL': 100,
-    'BGL': 10000
-}
+# Timeouts and Intervals
+COOLDOWN_SECONDS = 3
+UPDATE_INTERVAL = 55  # seconds
+CACHE_TIMEOUT = 60
+PAGE_TIMEOUT = 60  # seconds
+ADMIN_CONFIRM_TIMEOUT = 30  # seconds
 
-# Balance namedtuple
-Balance = namedtuple('Balance', ['wl', 'dl', 'bgl'])
+# Database Status
+STATUS_AVAILABLE = 'available'
+STATUS_SOLD = 'sold'
+STATUS_DELETED = 'deleted'
+STATUS_PENDING = 'pending'
 
-# TransactionError definition
-class TransactionError(Exception):
-    pass
-
-# Maximum items per message
-MAX_ITEMS_PER_MESSAGE = 10
-
-# Stock status constants
-STATUS_AVAILABLE = 'AVAILABLE'
-STATUS_SOLD = 'SOLD'
-STATUS_DELETED = 'DELETED'
-STATUS_PENDING = 'PENDING'
-
-# Transaction type constants
+# Transaction Types
 TRANSACTION_PURCHASE = 'PURCHASE'
 TRANSACTION_REFUND = 'REFUND'
 TRANSACTION_ADMIN = 'ADMIN'
@@ -33,18 +24,54 @@ TRANSACTION_ADMIN_ADD = 'ADMIN_ADD'
 TRANSACTION_ADMIN_REMOVE = 'ADMIN_REMOVE'
 TRANSACTION_ADMIN_RESET = 'ADMIN_RESET'
 
-# Time constants
-UPDATE_INTERVAL = 55  # seconds
-COOLDOWN_SECONDS = 3
-PAGE_TIMEOUT = 60  # seconds
+# Currency Rates
+CURRENCY_RATES = {
+    'WL': 1,
+    'DL': 100,
+    'BGL': 10000
+}
 
-# Embed colors (in decimal)
-COLOR_SUCCESS = 0x00ff00  # Green
-COLOR_ERROR = 0xff0000    # Red
-COLOR_INFO = 0x0000ff     # Blue
-COLOR_WARNING = 0xffff00  # Yellow
+# File Limits and Settings
+MAX_STOCK_FILE_SIZE = 1024 * 1024  # 1MB
+VALID_STOCK_FORMATS = ['txt']
+MAX_FILE_SIZES = {
+    'stock': 1024 * 1024,  # 1MB
+    'backup': 10 * 1024 * 1024  # 10MB
+}
+ALLOWED_FILE_TYPES = {
+    'stock': ['txt'],
+    'backup': ['db', 'sqlite', 'backup']
+}
 
-# Bot response messages dictionary
+# Pagination Settings
+DEFAULT_PAGE_SIZE = 5
+MAX_PAGE_SIZE = 20
+ITEMS_PER_PAGE = 5
+PAGINATION_TIMEOUT = 60
+PAGINATION_EMOJIS = {
+    'previous': '⬅️',
+    'next': '➡️',
+    'first': '⏮️',
+    'last': '⏭️'
+}
+
+# Transaction Limits
+MIN_TRANSACTION_AMOUNT = 1
+MAX_TRANSACTION_AMOUNT = 1000000  # 1M WLs
+MIN_PURCHASE_QUANTITY = 1
+MAX_PURCHASE_QUANTITY = 100
+MAX_TRANSACTION_HISTORY = 50
+ADMIN_BULK_UPDATE_CHUNK = 10
+
+# Colors
+COLORS = {
+    'success': discord.Color.green(),
+    'error': discord.Color.red(),
+    'info': discord.Color.blue(),
+    'warning': discord.Color.yellow()
+}
+
+# Messages
 MESSAGES = {
     'ERROR_GENERIC': "❌ An error occurred. Please try again later.",
     'NO_PERMISSION': "❌ You don't have permission to use this command.",
@@ -68,73 +95,40 @@ MESSAGES = {
     'PROCESSING': "⏳ Processing... Please wait..."
 }
 
-# Individual message constants (backwards compatibility)
-MSG_ERROR_GENERIC = MESSAGES['ERROR_GENERIC']
-MSG_NO_PERMISSION = MESSAGES['NO_PERMISSION']
-MSG_COOLDOWN = MESSAGES['COOLDOWN']
-MSG_INVALID_AMOUNT = MESSAGES['INVALID_AMOUNT']
-MSG_INSUFFICIENT_BALANCE = MESSAGES['INSUFFICIENT_BALANCE']
-MSG_INSUFFICIENT_STOCK = MESSAGES['INSUFFICIENT_STOCK']
-MSG_SUCCESS_PURCHASE = MESSAGES['SUCCESS_PURCHASE']
-MSG_SUCCESS_DEPOSIT = MESSAGES['SUCCESS_DEPOSIT']
-MSG_SUCCESS_WITHDRAW = MESSAGES['SUCCESS_WITHDRAW']
-
-# Permission levels
-PERMISSION_ADMIN = 'ADMIN'
-PERMISSION_MOD = 'MOD'
-PERMISSION_USER = 'USER'
-
-# Database related
+# Database Settings
 DB_FILE = 'shop.db'
 DB_BACKUP_DIR = 'backups'
-MAX_TRANSACTION_HISTORY = 50
 
-# File settings
-MAX_STOCK_FILE_SIZE = 1024 * 1024  # 1MB
-VALID_STOCK_FORMATS = ['txt']
-ITEMS_PER_PAGE = 5
-
-# Additional settings
-MIN_PURCHASE_QUANTITY = 1
-MAX_PURCHASE_QUANTITY = 100
-
-# Log settings
+# Logging Settings
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 LOG_FILE = 'bot.log'
 
-# Product Fields
+# Permission Levels
+PERMISSION_LEVELS = {
+    'ADMIN': 3,
+    'MOD': 2,
+    'USER': 1
+}
+
+# Product Settings
 VALID_PRODUCT_FIELDS = ['name', 'price', 'description']
+MAX_ITEMS_PER_MESSAGE = 10
 
-# Admin Settings
-ADMIN_CONFIRM_TIMEOUT = 30  # seconds
-ADMIN_BULK_UPDATE_CHUNK = 10  # items per progress update
+# Custom Exceptions
+class TransactionError(Exception):
+    """Custom exception for transaction-related errors"""
+    pass
 
-# File Upload Settings
-ALLOWED_FILE_TYPES = {
-    'stock': ['txt'],
-    'backup': ['db', 'sqlite', 'backup']
-}
-MAX_FILE_SIZES = {
-    'stock': 1024 * 1024,  # 1MB
-    'backup': 10 * 1024 * 1024  # 10MB
-}
+class PermissionError(Exception):
+    """Custom exception for permission-related errors"""
+    pass
 
-# Pagination Settings
-DEFAULT_PAGE_SIZE = 5
-MAX_PAGE_SIZE = 20
-PAGINATION_TIMEOUT = 60  # seconds
-PAGINATION_EMOJIS = {
-    'previous': '⬅️',
-    'next': '➡️',
-    'first': '⏮️',
-    'last': '⏭️'
-}
+class ValidationError(Exception):
+    """Custom exception for validation-related errors"""
+    pass
 
-# Transaction Settings
-MIN_TRANSACTION_AMOUNT = 1
-MAX_TRANSACTION_AMOUNT = 1000000  # 1M WLs
-
+# Balance Class
 class Balance:
     def __init__(self, wl: int = 0, dl: int = 0, bgl: int = 0):
         self.wl = wl
@@ -151,11 +145,23 @@ class Balance:
             parts.append(f"{self.dl:,} DL")
         if self.wl > 0:
             parts.append(f"{self.wl:,} WL")
-        
-        if not parts:
-            return "0 WL"
-        return " + ".join(parts)
-        
+        return " + ".join(parts) if parts else "0 WL"
+    
     def to_wls(self) -> int:
         """Convert balance to total WLs"""
-        return self.wl + (self.dl * 100) + (self.bgl * 10000)
+        return self.wl + (self.dl * CURRENCY_RATES['DL']) + (self.bgl * CURRENCY_RATES['BGL'])
+    
+    @classmethod
+    def from_wls(cls, total_wls: int) -> 'Balance':
+        """Create Balance instance from total WLs"""
+        bgl = total_wls // CURRENCY_RATES['BGL']
+        remaining = total_wls % CURRENCY_RATES['BGL']
+        dl = remaining // CURRENCY_RATES['DL']
+        wl = remaining % CURRENCY_RATES['DL']
+        return cls(wl=wl, dl=dl, bgl=bgl)
+
+    def __str__(self) -> str:
+        return self.format()
+
+    def __repr__(self) -> str:
+        return f"Balance(wl={self.wl}, dl={self.dl}, bgl={self.bgl})"
