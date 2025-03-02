@@ -9,20 +9,31 @@ from .constants import (
     STATUS_SOLD,
     TRANSACTION_PURCHASE,
     TRANSACTION_REFUND,
-    TransactionError
+    TransactionError,
+    Balance
 )
 
-class TransactionManager(commands.Cog):
+class TransactionManager:
+    """Manager class for handling transactions"""
+    _instance = None
+
+    def __new__(cls, bot):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self, bot):
-        self.bot = bot
-        self.logger = logging.getLogger("TransactionManager")
-        
-        # Import managers here to avoid circular imports
-        from .balance_manager import BalanceManager
-        from .product_manager import ProductManager
-        
-        self.balance_manager = BalanceManager(bot)
-        self.product_manager = ProductManager(bot)
+        if not hasattr(self, 'initialized'):
+            self.bot = bot
+            self.logger = logging.getLogger("TransactionManager")
+            
+            # Import managers here to avoid circular imports
+            from .balance_manager import BalanceManager
+            from .product_manager import ProductManager
+            
+            self.balance_manager = BalanceManager(bot)
+            self.product_manager = ProductManager(bot)
+            self.initialized = True
 
     async def process_purchase(
         self, 
@@ -146,6 +157,7 @@ class TransactionManager(commands.Cog):
 
             cursor.execute("""
                 SELECT 
+                    id,
                     type,
                     details,
                     old_balance,
@@ -160,6 +172,7 @@ class TransactionManager(commands.Cog):
             """, (growid.upper(), limit))
 
             return [{
+                'id': row['id'],
                 'type': row['type'],
                 'details': row['details'],
                 'old_balance': row['old_balance'],
@@ -179,5 +192,28 @@ class TransactionManager(commands.Cog):
             if conn:
                 conn.close()
 
+class Transaction(commands.Cog):
+    """Cog for transaction commands"""
+    def __init__(self, bot):
+        self.bot = bot
+        self.logger = logging.getLogger("Transaction")
+        self._task = None
+        self.manager = TransactionManager(bot)
+
+        # Flag untuk mencegah duplikasi
+        if not hasattr(bot, 'transaction_initialized'):
+            bot.transaction_initialized = True
+            self.logger.info("Transaction cog initialized")
+
+    def cog_unload(self):
+        """Cleanup saat unload"""
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self.logger.info("Transaction cog unloaded")
+
 async def setup(bot):
-    await bot.add_cog(TransactionManager(bot))
+    """Setup the Transaction cog"""
+    if not hasattr(bot, 'transaction_cog_loaded'):
+        await bot.add_cog(Transaction(bot))
+        bot.transaction_cog_loaded = True
+        logging.info('Transaction cog loaded successfully')
