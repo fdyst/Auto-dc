@@ -1,11 +1,14 @@
 import discord
 from discord.ext import commands
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import asyncio
 from typing import Optional, List
 import io
+import psutil
+import platform
+import aiohttp
 
 from ext.constants import (
     CURRENCY_RATES,
@@ -114,6 +117,13 @@ class AdminCog(commands.Cog, name="Admin"):
             "Transaction Management": [
                 "`trxhistory <growid> [limit]`\nView transactions",
                 "`stockhistory <code> [limit]`\nView stock history"
+            ],
+            "System Management": [
+                "`botinfo`\nShow bot system information",
+                "`announcement <message>`\nSend announcement to all users",
+                "`maintenance <on/off>`\nToggle maintenance mode",
+                "`blacklist <add/remove> <growid>`\nManage blacklisted users",
+                "`backup`\nCreate database backup"
             ]
         }
 
@@ -126,37 +136,38 @@ class AdminCog(commands.Cog, name="Admin"):
 
         embed.set_footer(text=f"Requested by {ctx.author}")
         await ctx.send(embed=embed)
-        @commands.command(name="addproduct")
-        async def add_product(self, ctx, code: str, name: str, price: int, *, description: Optional[str] = None):
-            """Add new product"""
-            if not await self._check_admin(ctx):
-                return
-                
-            try:
-                result = await self.product_service.create_product(
-                    code=code,
-                    name=name,
-                    price=price,
-                    description=description
-                )
-                
-                embed = discord.Embed(
-                    title="✅ Product Added",
-                    color=discord.Color.green(),
-                    timestamp=datetime.utcnow()
-                )
-                embed.add_field(name="Code", value=result['code'], inline=True)
-                embed.add_field(name="Name", value=result['name'], inline=True)
-                embed.add_field(name="Price", value=f"{result['price']:,} WLs", inline=True)
-                if result['description']:
-                    embed.add_field(name="Description", value=result['description'], inline=False)
-                
-                await ctx.send(embed=embed)
-                self.logger.info(f"Product {code} added by {ctx.author}")
-                
-            except Exception as e:
-                await ctx.send(f"❌ Error: {str(e)}")
-                self.logger.error(f"Error adding product: {e}")
+
+    @commands.command(name="addproduct")
+    async def add_product(self, ctx, code: str, name: str, price: int, *, description: Optional[str] = None):
+        """Add new product"""
+        if not await self._check_admin(ctx):
+            return
+            
+        try:
+            result = await self.product_service.create_product(
+                code=code,
+                name=name,
+                price=price,
+                description=description
+            )
+            
+            embed = discord.Embed(
+                title="✅ Product Added",
+                color=discord.Color.green(),
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Code", value=result['code'], inline=True)
+            embed.add_field(name="Name", value=result['name'], inline=True)
+            embed.add_field(name="Price", value=f"{result['price']:,} WLs", inline=True)
+            if result['description']:
+                embed.add_field(name="Description", value=result['description'], inline=False)
+            
+            await ctx.send(embed=embed)
+            self.logger.info(f"Product {code} added by {ctx.author}")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            self.logger.error(f"Error adding product: {e}")
 
     @commands.command(name="addstock")
     async def add_stock(self, ctx, code: str):
@@ -300,40 +311,41 @@ class AdminCog(commands.Cog, name="Admin"):
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
             self.logger.error(f"Error removing balance: {e}")
-        @commands.command(name="checkbal")
-        async def check_balance(self, ctx, growid: str):
-            """Check user balance"""
-            if not await self._check_admin(ctx):
+
+    @commands.command(name="checkbal")
+    async def check_balance(self, ctx, growid: str):
+        """Check user balance"""
+        if not await self._check_admin(ctx):
+            return
+            
+        try:
+            balance = await self.balance_service.get_balance(growid.upper())
+            if not balance:
+                await ctx.send(f"❌ User {growid} not found!")
                 return
-                
-            try:
-                balance = await self.balance_service.get_balance(growid.upper())
-                if not balance:
-                    await ctx.send(f"❌ User {growid} not found!")
-                    return
-    
-                transactions = await self.trx_manager.get_transaction_history(growid.upper(), limit=5)
-    
-                embed = discord.Embed(
-                    title=f"👤 User Information - {growid.upper()}",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.utcnow()
-                )
-                embed.add_field(name="Current Balance", value=balance.format(), inline=False)
-                
-                if transactions:
-                    recent_tx = "\n".join([
-                        f"• {tx['type']} - {tx['timestamp']}: {tx['details']}"
-                        for tx in transactions
-                    ])
-                    embed.add_field(name="Recent Transactions", value=recent_tx, inline=False)
-    
-                embed.set_footer(text=f"Checked by {ctx.author}")
-                await ctx.send(embed=embed)
-                
-            except Exception as e:
-                await ctx.send(f"❌ Error: {str(e)}")
-                self.logger.error(f"Error checking balance: {e}")
+
+            transactions = await self.trx_manager.get_transaction_history(growid.upper(), limit=5)
+
+            embed = discord.Embed(
+                title=f"👤 User Information - {growid.upper()}",
+                color=discord.Color.blue(),
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Current Balance", value=balance.format(), inline=False)
+            
+            if transactions:
+                recent_tx = "\n".join([
+                    f"• {tx['type']} - {tx['timestamp']}: {tx['details']}"
+                    for tx in transactions
+                ])
+                embed.add_field(name="Recent Transactions", value=recent_tx, inline=False)
+
+            embed.set_footer(text=f"Checked by {ctx.author}")
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            self.logger.error(f"Error checking balance: {e}")
 
     @commands.command(name="resetuser")
     async def reset_user(self, ctx, growid: str):
@@ -342,6 +354,10 @@ class AdminCog(commands.Cog, name="Admin"):
             return
 
         try:
+            if not await self._confirm_action(ctx, f"Are you sure you want to reset {growid}'s balance?"):
+                await ctx.send("❌ Operation cancelled.")
+                return
+
             growid = growid.upper()
             current_balance = await self.balance_service.get_balance(growid)
             if not current_balance:
@@ -375,245 +391,264 @@ class AdminCog(commands.Cog, name="Admin"):
             await ctx.send(f"❌ Error: {str(e)}")
             self.logger.error(f"Error resetting user: {e}")
 
-    @commands.command(name="trxhistory")
-    async def transaction_history(self, ctx, growid: str, limit: int = 10):
-        """View transaction history"""
+    # Fitur Admin Baru
+
+    @commands.command(name="botinfo")
+    async def bot_info(self, ctx):
+        """Show bot system information"""
         if not await self._check_admin(ctx):
             return
-            
+
         try:
-            growid = growid.upper()
-            transactions = await self.trx_manager.get_transaction_history(growid, limit)
-            if not transactions:
-                await ctx.send(f"❌ No transactions found for {growid}")
-                return
-
-            pages = []
-            items_per_page = 5
+            # Get system info
+            cpu_usage = psutil.cpu_percent()
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
             
-            for i in range(0, len(transactions), items_per_page):
-                embed = discord.Embed(
-                    title=f"Transaction History - {growid}",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.utcnow()
-                )
-                
-                page_transactions = transactions[i:i + items_per_page]
-                for tx in page_transactions:
-                    value = (
-                        f"Type: {tx['type']}\n"
-                        f"Details: {tx['details']}\n"
-                        f"Old Balance: {tx['old_balance']}\n"
-                        f"New Balance: {tx['new_balance']}\n"
-                        f"Items: {tx['items_count'] if tx.get('items_count') else 'N/A'}\n"
-                        f"Total Price: {tx['total_price']:,} WLs" if tx.get('total_price') else "Total Price: N/A\n"
-                        f"Time: {tx['created_at']}"
-                    )
-                    embed.add_field(
-                        name=f"Transaction #{tx['id']}", 
-                        value=value,
-                        inline=False
-                    )
-                
-                embed.set_footer(text=f"Page {i//items_per_page + 1}/{(len(transactions)-1)//items_per_page + 1}")
-                pages.append(embed)
-
-            message = await ctx.send(embed=pages[0])
+            # Get bot info
+            uptime = datetime.utcnow() - self.bot.startup_time
             
-            if len(pages) > 1:
-                await message.add_reaction('⬅️')
-                await message.add_reaction('➡️')
-
-                current_page = 0
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in ['⬅️', '➡️']
-
-                while True:
-                    try:
-                        reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-
-                        if str(reaction.emoji) == '➡️':
-                            current_page = (current_page + 1) % len(pages)
-                        elif str(reaction.emoji) == '⬅️':
-                            current_page = (current_page - 1) % len(pages)
-
-                        await message.edit(embed=pages[current_page])
-                        await message.remove_reaction(reaction, user)
-
-                    except asyncio.TimeoutError:
-                        await message.clear_reactions()
-                        break
-
-            self.logger.info(f"Transactions viewed for {growid} by {ctx.author}")
+            embed = discord.Embed(
+                title="🤖 Bot System Information",
+                color=discord.Color.blue(),
+                timestamp=datetime.utcnow()
+            )
+            
+            # System Stats
+            sys_info = (
+                f"OS: {platform.system()} {platform.release()}\n"
+                f"CPU Usage: {cpu_usage}%\n"
+                f"RAM: {memory.used/1024/1024/1024:.1f}GB/{memory.total/1024/1024/1024:.1f}GB ({memory.percent}%)\n"
+                f"Disk: {disk.used/1024/1024/1024:.1f}GB/{disk.total/1024/1024/1024:.1f}GB ({disk.percent}%)"
+            )
+            embed.add_field(name="💻 System", value=sys_info, inline=False)
+            
+            # Bot Stats
+            bot_stats = (
+                f"Uptime: {str(uptime).split('.')[0]}\n"
+                f"Latency: {round(self.bot.latency * 1000)}ms\n"
+                f"Servers: {len(self.bot.guilds)}\n"
+                f"Commands: {len(self.bot.commands)}"
+            )
+            embed.add_field(name="🤖 Bot", value=bot_stats, inline=False)
+            
+            await ctx.send(embed=embed)
             
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error viewing transactions: {e}")
+            self.logger.error(f"Error getting bot info: {e}")
 
-    @commands.command(name="stockhistory")
-    async def stock_history(self, ctx, product_code: str, limit: int = 10):
-        """View stock history for a product"""
+    @commands.command(name="announcement")
+    async def announcement(self, ctx, *, message: str):
+        """Send announcement to all users"""
         if not await self._check_admin(ctx):
             return
-            
+
         try:
-            product = await self.product_service.get_product(product_code.upper())
-            if not product:
-                await ctx.send(f"❌ Product code {product_code} not found!")
+            if not await self._confirm_action(ctx, "Are you sure you want to send this announcement to all users?"):
+                await ctx.send("❌ Announcement cancelled.")
                 return
 
-            stock_items = await self.product_service.get_stock_history(
-                product_code=product_code.upper(),
-                limit=limit
-            )
-
-            if not stock_items:
-                await ctx.send(f"❌ No stock history found for {product_code}")
-                return
-
-            pages = []
-            items_per_page = 5
-
-            for i in range(0, len(stock_items), items_per_page):
-                embed = discord.Embed(
-                    title=f"Stock History - {product['name']} ({product_code.upper()})",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.utcnow()
-                )
-
-                page_items = stock_items[i:i + items_per_page]
-                for item in page_items:
-                    value = (
-                        f"Status: {item['status']}\n"
-                        f"Added by: {item['added_by']}\n"
-                        f"Added at: {item['added_at']}\n"
-                        f"Buyer: {item['buyer_id'] if item['buyer_id'] else 'N/A'}\n"
-                        f"Used at: {item['used_at'] if item['used_at'] else 'N/A'}"
-                    )
-                    embed.add_field(
-                        name=f"Stock #{item['id']}", 
-                        value=value,
-                        inline=False
-                    )
-
-                embed.set_footer(text=f"Page {i//items_per_page + 1}/{(len(stock_items)-1)//items_per_page + 1}")
-                pages.append(embed)
-
-            message = await ctx.send(embed=pages[0])
-            
-            if len(pages) > 1:
-                await message.add_reaction('⬅️')
-                await message.add_reaction('➡️')
-
-                current_page = 0
-
-                def check(reaction, user):
-                    return user == ctx.author and str(reaction.emoji) in ['⬅️', '➡️']
-
-                while True:
-                    try:
-                        reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-
-                        if str(reaction.emoji) == '➡️':
-                            current_page = (current_page + 1) % len(pages)
-                        elif str(reaction.emoji) == '⬅️':
-                            current_page = (current_page - 1) % len(pages)
-
-                        await message.edit(embed=pages[current_page])
-                        await message.remove_reaction(reaction, user)
-
-                    except asyncio.TimeoutError:
-                        await message.clear_reactions()
-                        break
-
-            self.logger.info(f"Stock history viewed for {product_code} by {ctx.author}")
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error viewing stock history: {e}")
-
-    @commands.command(name="editproduct")
-    async def edit_product(self, ctx, code: str, field: str, *, value: str):
-        """Edit product details"""
-        if not await self._check_admin(ctx):
-            return
-            
-        try:
-            field = field.lower()
-            if field not in ['name', 'price', 'description']:
-                await ctx.send("❌ Valid fields are: name, price, description")
-                return
-
-            if field == 'price':
-                try:
-                    value = int(value)
-                    if value <= 0:
-                        await ctx.send("❌ Price must be positive!")
-                        return
-                except ValueError:
-                    await ctx.send("❌ Price must be a number!")
-                    return
-
-            product = await self.product_service.get_product(code.upper())
-            if not product:
-                await ctx.send(f"❌ Product {code} not found!")
-                return
-
-            updated_product = await self.product_service.update_product(
-                code=code.upper(),
-                updates={field: value}
-            )
+            # Get all users from database
+            conn = None
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT discord_id FROM user_growid")
+                users = cursor.fetchall()
+            finally:
+                if conn:
+                    conn.close()
 
             embed = discord.Embed(
-                title="✅ Product Updated",
+                title="📢 Announcement",
+                description=message,
+                color=discord.Color.gold(),
+                timestamp=datetime.utcnow()
+            )
+            embed.set_footer(text=f"Sent by {ctx.author}")
+
+            sent_count = 0
+            failed_count = 0
+
+            progress_msg = await ctx.send("⏳ Sending announcement...")
+
+            for user_data in users:
+                try:
+                    user = await self.bot.fetch_user(int(user_data['discord_id']))
+                    if user:
+                        await user.send(embed=embed)
+                        sent_count += 1
+                        if sent_count % 10 == 0:
+                            await progress_msg.edit(content=f"⏳ Sending... ({sent_count}/{len(users)})")
+                except:
+                    failed_count += 1
+
+            await progress_msg.delete()
+            
+            result_embed = discord.Embed(
+                title="✅ Announcement Sent",
                 color=discord.Color.green(),
                 timestamp=datetime.utcnow()
             )
-            embed.add_field(name="Code", value=updated_product['code'], inline=True)
-            embed.add_field(name="Name", value=updated_product['name'], inline=True)
-            embed.add_field(name="Price", value=f"{updated_product['price']:,} WLs", inline=True)
-            if updated_product['description']:
-                embed.add_field(name="Description", value=updated_product['description'], inline=False)
+            result_embed.add_field(name="Total Users", value=len(users), inline=True)
+            result_embed.add_field(name="Sent Successfully", value=sent_count, inline=True)
+            result_embed.add_field(name="Failed", value=failed_count, inline=True)
             
-            await ctx.send(embed=embed)
-            self.logger.info(f"Product {code} updated by {ctx.author}")
+            await ctx.send(embed=result_embed)
+            self.logger.info(f"Announcement sent by {ctx.author}: {sent_count} success, {failed_count} failed")
             
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error editing product: {e}")
+            self.logger.error(f"Error sending announcement: {e}")
 
-    @commands.command(name="deleteproduct")
-    async def delete_product(self, ctx, code: str):
-        """Delete a product"""
+    @commands.command(name="maintenance")
+    async def maintenance(self, ctx, mode: str):
+        """Toggle maintenance mode"""
         if not await self._check_admin(ctx):
             return
 
         try:
-            product = await self.product_service.get_product(code.upper())
-            if not product:
-                await ctx.send(f"❌ Product {code} not found!")
+            mode = mode.lower()
+            if mode not in ['on', 'off']:
+                await ctx.send("❌ Please specify 'on' or 'off'")
                 return
 
-            success = await self.product_service.delete_product(code.upper())
-            if not success:
-                await ctx.send("❌ Failed to delete product!")
-                return
+            # Update maintenance status in database
+            conn = None
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
+                    ("maintenance_mode", "1" if mode == "on" else "0")
+                )
+                conn.commit()
+            finally:
+                if conn:
+                    conn.close()
 
             embed = discord.Embed(
-                title="✅ Product Deleted",
-                description=f"Product {product['name']} ({code.upper()}) has been deleted.",
-                color=discord.Color.red(),
+                title="🔧 Maintenance Mode",
+                description=f"Maintenance mode has been turned **{mode.upper()}**",
+                color=discord.Color.orange() if mode == "on" else discord.Color.green(),
                 timestamp=datetime.utcnow()
             )
-            embed.set_footer(text=f"Deleted by {ctx.author}")
+            embed.set_footer(text=f"Changed by {ctx.author}")
             
             await ctx.send(embed=embed)
-            self.logger.info(f"Product {code} deleted by {ctx.author}")
+            self.logger.info(f"Maintenance mode {mode} by {ctx.author}")
+
+            if mode == "on":
+                # Notify all online users
+                for guild in self.bot.guilds:
+                    for member in guild.members:
+                        if not member.bot and member.status != discord.Status.offline:
+                            try:
+                                await member.send(
+                                    "⚠️ The bot is entering maintenance mode. "
+                                    "Some features may be unavailable. "
+                                    "We'll notify you when service is restored."
+                                )
+                            except:
+                                continue
             
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
-            self.logger.error(f"Error deleting product: {e}")
+            self.logger.error(f"Error toggling maintenance mode: {e}")
+
+    @commands.command(name="blacklist")
+    async def blacklist(self, ctx, action: str, growid: str):
+        """Manage blacklisted users"""
+        if not await self._check_admin(ctx):
+            return
+
+        try:
+            action = action.lower()
+            if action not in ['add', 'remove']:
+                await ctx.send("❌ Please specify 'add' or 'remove'")
+                return
+
+            conn = None
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                
+                if action == "add":
+                    # Check if user exists
+                    cursor.execute("SELECT growid FROM users WHERE growid = ?", (growid.upper(),))
+                    if not cursor.fetchone():
+                        await ctx.send(f"❌ User {growid} not found!")
+                        return
+
+                    # Add to blacklist
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO blacklist (growid, added_by, added_at) VALUES (?, ?, ?)",
+                        (growid.upper(), str(ctx.author.id), datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
+                    )
+                else:
+                    # Remove from blacklist
+                    cursor.execute(
+                        "DELETE FROM blacklist WHERE growid = ?",
+                        (growid.upper(),)
+                    )
+
+                conn.commit()
+
+                embed = discord.Embed(
+                    title="⛔ Blacklist Updated",
+                    description=f"User {growid.upper()} has been {'added to' if action == 'add' else 'removed from'} the blacklist.",
+                    color=discord.Color.red() if action == 'add' else discord.Color.green(),
+                    timestamp=datetime.utcnow()
+                )
+                embed.set_footer(text=f"Updated by {ctx.author}")
+                
+                await ctx.send(embed=embed)
+                self.logger.info(f"User {growid} {action}ed to blacklist by {ctx.author}")
+                
+            finally:
+                if conn:
+                    conn.close()
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            self.logger.error(f"Error updating blacklist: {e}")
+
+    @commands.command(name="backup")
+    async def backup(self, ctx):
+        """Create database backup"""
+        if not await self._check_admin(ctx):
+            return
+
+        try:
+            # Create backup filename with timestamp
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            backup_filename = f"backup_{timestamp}.db"
+            
+            # Create backup
+            conn = None
+            try:
+                conn = get_connection()
+                # Create backup in memory
+                backup_data = io.BytesIO()
+                for line in conn.iterdump():
+                    backup_data.write(f'{line}\n'.encode('utf-8'))
+                backup_data.seek(0)
+                
+                # Send backup file
+                await ctx.send(
+                    "✅ Database backup created!",
+                    file=discord.File(backup_data, filename=backup_filename)
+                )
+                self.logger.info(f"Database backup created by {ctx.author}")
+                
+            finally:
+                if conn:
+                    conn.close()
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            self.logger.error(f"Error creating backup: {e}")
 
 async def setup(bot):
     """Setup the Admin cog"""
