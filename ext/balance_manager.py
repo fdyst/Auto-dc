@@ -1,257 +1,265 @@
-import discord
 import logging
-from datetime import datetime
+import asyncio
+import time
 from typing import Optional, Dict
-from database import get_connection
+from datetime import datetime
+
+import discord 
 from discord.ext import commands
-from .constants import Balance, CURRENCY_RATES
+
+from .constants import Balance, TransactionError
+from database import get_connection
 
 class BalanceManagerService:
-    """Service class for handling balance operations"""
     _instance = None
 
     def __new__(cls, bot):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance.initialized = False
         return cls._instance
 
     def __init__(self, bot):
-        if not hasattr(self, 'initialized'):
+        if not self.initialized:
             self.bot = bot
             self.logger = logging.getLogger("BalanceManagerService")
             self._cache = {}
+            self._cache_timeout = 30
+            self._locks = {}
             self.initialized = True
-            self.logger.info("BalanceManagerService initialized")
 
-    def clear_cache(self, growid: str = None):
-        """Clear balance cache"""
-        if growid:
-            self._cache.pop(growid, None)
-            self.logger.debug(f"Cleared cache for GrowID: {growid}")
-        else:
-            self._cache.clear()
-            self.logger.debug("Cleared all cache")
+    # ... (kode BalanceManagerService yang sama seperti sebelumnya) ...
+    async def _get_lock(self, key: str) -> asyncio.Lock:
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
 
-    async def register_user(self, discord_id: int, growid: str) -> bool:
-        """Register or update user's GrowID"""
-        conn = None
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Begin transaction
-            conn.execute("BEGIN TRANSACTION")
-            
-            # First ensure user exists in users table
-            cursor.execute("""
-                INSERT OR IGNORE INTO users (growid)
-                VALUES (?)
-            """, (growid.upper(),))
-            
-            # Then map Discord ID to GrowID
-            cursor.execute("""
-                INSERT OR REPLACE INTO user_growid (discord_id, growid)
-                VALUES (?, ?)
-            """, (str(discord_id), growid.upper()))
-            
-            conn.commit()
-            # Clear cache for this user
-            self.clear_cache(growid.upper())
-            self.logger.info(f"Registered Discord user {discord_id} with GrowID {growid}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error registering user: {e}")
-            if conn:
-                conn.rollback()
-            raise
-        finally:
-            if conn:
-                conn.close()
-
-    async def get_growid(self, discord_id: int) -> Optional[str]:
-        """Get user's GrowID"""
-        conn = None
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT growid FROM user_growid 
-                WHERE discord_id = ?
-            """, (str(discord_id),))
-            
-            result = cursor.fetchone()
-            if result:
-                self.logger.info(f"Found GrowID for Discord ID {discord_id}: {result['growid']}")
+    async def get_growid(self, discord_id: str) -> Optional[str]:
+        cache_key = f"growid_{discord_id}"
+        
+        if cache_key in self._cache:
+            cached_data = self._cache[cache_key]
+            if time.time() - cached_data['timestamp'] < self._cache_timeout:
+                return cached_data['value']
             else:
-                self.logger.info(f"No GrowID found for Discord ID {discord_id}")
+                del self._cache[cache_key]
+
+        async with await self._get_lock(cache_key):
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT growid FROM user_growid WHERE discord_id = ?",
+                    (str(discord_id),)
+                )
+                result = cursor.fetchone()
                 
-            return result['growid'] if result else None
+                if result:
+                    growid = result['growid']
+                    self._cache[cache_key] = {
+                        'value': growid,
+                        'timestamp': time.time()
+                    }
+                    self.logger.info(f"Found GrowID for Discord ID {discord_id}: {growid}")
+                    return growid
+                return None
 
-        except Exception as e:
-            self.logger.error(f"Error getting GrowID: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
+            except Exception as e:
+                self.logger.error(f"Error getting GrowID: {e}")
+                return None
+            finally:
+                if conn:
+                    conn.close()
 
-    async def has_growid(self, discord_id: int) -> bool:
-        """Check if user has registered GrowID"""
-        growid = await self.get_growid(discord_id)
-        return growid is not None
+    async def register_user(self, discord_id: str, growid: str) -> bool:
+        async with await self._get_lock(f"register_{discord_id}"):
+            conn = None
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                
+                # Create user if not exists
+                cursor.execute(
+                    "INSERT OR IGNORE INTO users (growid) VALUES (?)",
+                    (growid.upper(),)
+                )
+                
+                # Link Discord ID to GrowID
+                cursor.execute(
+                    "INSERT OR REPLACE INTO user_growid (discord_id, growid) VALUES (?, ?)",
+                    (str(discord_id), growid.upper())
+                )
+                
+                conn.commit()
+                self.logger.info(f"Registered Discord user {discord_id} with GrowID {growid}")
+                
+                # Update cache
+                cache_key = f"growid_{discord_id}"
+                self._cache[cache_key] = {
+                    'value': growid.upper(),
+                    'timestamp': time.time()
+                }
+                
+                return True
+
+            except Exception as e:
+                self.logger.error(f"Error registering user: {e}")
+                if conn:
+                    conn.rollback()
+                return False
+            finally:
+                if conn:
+                    conn.close()
 
     async def get_balance(self, growid: str) -> Optional[Balance]:
-        """Get user balance"""
-        if growid in self._cache:
-            self.logger.debug(f"Retrieved balance from cache for GrowID: {growid}")
-            return self._cache[growid]
+        cache_key = f"balance_{growid}"
+        
+        if cache_key in self._cache:
+            cached_data = self._cache[cache_key]
+            if time.time() - cached_data['timestamp'] < self._cache_timeout:
+                return cached_data['value']
+            else:
+                del self._cache[cache_key]
 
-        conn = None
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT balance_wl, balance_dl, balance_bgl 
-                FROM users WHERE growid = ?
-            """, (growid.upper(),))
-            
-            result = cursor.fetchone()
-            if result:
-                balance = Balance(
-                    result['balance_wl'],
-                    result['balance_dl'],
-                    result['balance_bgl']
+        async with await self._get_lock(cache_key):
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT balance_wl, balance_dl, balance_bgl 
+                    FROM users 
+                    WHERE growid = ?
+                    """,
+                    (growid.upper(),)
                 )
-                self._cache[growid] = balance
-                self.logger.debug(f"Retrieved and cached balance for GrowID: {growid}")
-                return balance
-            
-            self.logger.info(f"No balance found for GrowID: {growid}")
-            return None
+                result = cursor.fetchone()
+                
+                if result:
+                    balance = Balance(
+                        result['balance_wl'],
+                        result['balance_dl'],
+                        result['balance_bgl']
+                    )
+                    self._cache[cache_key] = {
+                        'value': balance,
+                        'timestamp': time.time()
+                    }
+                    return balance
+                return None
 
-        except Exception as e:
-            self.logger.error(f"Error getting balance: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
+            except Exception as e:
+                self.logger.error(f"Error getting balance: {e}")
+                return None
+            finally:
+                if conn:
+                    conn.close()
 
-    async def update_balance(
-        self, 
-        growid: str, 
-        wl: int = 0, 
-        dl: int = 0, 
-        bgl: int = 0,
-        details: str = "", 
-        transaction_type: str = "UPDATE"
-    ) -> Balance:
-        """Update user balance"""
-        conn = None
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Begin transaction
-            conn.execute("BEGIN TRANSACTION")
+    async def update_balance(self, growid: str, wl: int = 0, dl: int = 0, bgl: int = 0,
+                           details: str = "", transaction_type: str = "") -> Optional[Balance]:
+        async with await self._get_lock(f"balance_{growid}"):
+            conn = None
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                
+                # Get current balance
+                cursor.execute(
+                    "SELECT balance_wl, balance_dl, balance_bgl FROM users WHERE growid = ?",
+                    (growid.upper(),)
+                )
+                current = cursor.fetchone()
+                
+                if not current:
+                    raise TransactionError(f"User {growid} not found")
+                
+                old_balance = Balance(
+                    current['balance_wl'],
+                    current['balance_dl'],
+                    current['balance_bgl']
+                )
+                
+                # Calculate new balance
+                new_wl = max(0, current['balance_wl'] + wl)
+                new_dl = max(0, current['balance_dl'] + dl)
+                new_bgl = max(0, current['balance_bgl'] + bgl)
+                
+                # Update balance
+                cursor.execute(
+                    """
+                    UPDATE users 
+                    SET balance_wl = ?, balance_dl = ?, balance_bgl = ? 
+                    WHERE growid = ?
+                    """,
+                    (new_wl, new_dl, new_bgl, growid.upper())
+                )
+                
+                # Record transaction
+                new_balance = Balance(new_wl, new_dl, new_bgl)
+                cursor.execute(
+                    """
+                    INSERT INTO transactions 
+                    (growid, type, details, old_balance, new_balance) 
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        growid.upper(),
+                        transaction_type,
+                        details,
+                        old_balance.format(),
+                        new_balance.format()
+                    )
+                )
+                
+                conn.commit()
+                
+                # Update cache
+                cache_key = f"balance_{growid}"
+                self._cache[cache_key] = {
+                    'value': new_balance,
+                    'timestamp': time.time()
+                }
+                
+                self.logger.info(f"Updated balance for {growid}: {old_balance.format()} -> {new_balance.format()}")
+                return new_balance
 
-            # Get current balance
-            cursor.execute("""
-                SELECT balance_wl, balance_dl, balance_bgl 
-                FROM users WHERE growid = ?
-            """, (growid.upper(),))
-            
-            result = cursor.fetchone()
-            if not result:
-                raise ValueError(f"User {growid} not found")
+            except Exception as e:
+                self.logger.error(f"Error updating balance: {e}")
+                if conn:
+                    conn.rollback()
+                return None
+            finally:
+                if conn:
+                    conn.close()
 
-            old_balance = Balance(
-                result['balance_wl'],
-                result['balance_dl'],
-                result['balance_bgl']
-            )
-            
-            new_balance = Balance(
-                old_balance.wl + wl,
-                old_balance.dl + dl,
-                old_balance.bgl + bgl
-            )
-
-            if new_balance.total_wls < 0:
-                raise ValueError("Insufficient balance")
-
-            # Update balance
-            cursor.execute("""
-                UPDATE users 
-                SET balance_wl = ?, 
-                    balance_dl = ?, 
-                    balance_bgl = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE growid = ?
-            """, (new_balance.wl, new_balance.dl, new_balance.bgl, growid.upper()))
-
-            # Log transaction
-            cursor.execute("""
-                INSERT INTO transactions 
-                (growid, type, details, old_balance, new_balance)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                growid.upper(), 
-                transaction_type,
-                details,
-                old_balance.format(),
-                new_balance.format()
-            ))
-
-            conn.commit()
-            # Update cache
-            self._cache[growid] = new_balance
-            self.logger.info(f"Updated balance for {growid}: {old_balance.format()} -> {new_balance.format()}")
-            return new_balance
-
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            self.logger.error(f"Error updating balance: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
-
-class BalanceManager(commands.Cog):
-    """Cog for balance management commands"""
+    async def cleanup(self):
+        """Cleanup resources"""
+        self._cache.clear()
+        self._locks.clear()
+class BalanceManagerCog(commands.Cog):
+    """Cog for balance management commands and functionality"""
+    
     def __init__(self, bot):
         self.bot = bot
-        self.logger = logging.getLogger("BalanceManager")
-        self._task = None
-        self.manager = BalanceManagerService(bot)
+        self.balance_service = BalanceManagerService(bot)
+        self.logger = logging.getLogger("BalanceManagerCog")
 
-        # Flag untuk mencegah duplikasi
-        if not hasattr(bot, 'balance_manager_initialized'):
-            bot.balance_manager_initialized = True
-            self.logger.info("BalanceManager cog initialized")
-
-    def cog_unload(self):
-        """Cleanup when cog is unloaded"""
-        if self._task and not self._task.done():
-            self._task.cancel()
-        # Clear cache on unload
-        if hasattr(self, 'manager'):
-            self.manager.clear_cache()
-        self.logger.info("BalanceManager cog unloaded")
-        
     @commands.Cog.listener()
     async def on_ready(self):
-        """Handler for when bot is ready"""
-        # Clear cache on bot ready
-        if hasattr(self, 'manager'):
-            self.manager.clear_cache()
-        self.logger.info("BalanceManager is ready")
+        self.logger.info(f"BalanceManagerCog is ready at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+    async def cog_load(self):
+        """Called when the cog is loaded"""
+        self.logger.info("BalanceManagerCog loading...")
+
+    async def cog_unload(self):
+        """Called when the cog is unloaded"""
+        await self.balance_service.cleanup()
+        self.logger.info("BalanceManagerCog unloaded")
 
 async def setup(bot):
     """Setup the BalanceManager cog"""
     if not hasattr(bot, 'balance_manager_loaded'):
-        await bot.add_cog(BalanceManager(bot))
+        await bot.add_cog(BalanceManagerCog(bot))
         bot.balance_manager_loaded = True
-        logging.info('BalanceManager cog loaded successfully')
+        logging.info(f'BalanceManager cog loaded successfully at {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC')
