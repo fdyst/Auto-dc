@@ -176,6 +176,9 @@ class SetGrowIDModal(Modal, title="Set GrowID"):
                 )
                 return
             
+            # Clear any existing cache before registration
+            self.balance_manager.clear_cache()
+            
             success = await self.balance_manager.register_user(interaction.user.id, growid)
             if not success:
                 await interaction.followup.send(
@@ -191,6 +194,7 @@ class SetGrowIDModal(Modal, title="Set GrowID"):
                 timestamp=datetime.utcnow()
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
+            self.logger.info(f"Set GrowID for Discord user {interaction.user.id} to {growid}")
 
         except Exception as e:
             self.logger.error(f"Error in SetGrowIDModal: {e}")
@@ -458,7 +462,7 @@ class LiveStock(commands.Cog):
         self.logger = logging.getLogger("LiveStock")
         self._task = None
         
-        # Flag untuk mencegah duplikasi
+        # Flag untuk mencegah duplikasi dan memastikan persistensi data
         if not hasattr(bot, 'live_stock_initialized'):
             bot.live_stock_initialized = True
             self.bot.loop.create_task(self._initialize_view())
@@ -470,16 +474,27 @@ class LiveStock(commands.Cog):
             self._task.cancel()
         if hasattr(self, 'live_stock') and self.live_stock.is_running():
             self.live_stock.cancel()
+        # Clear any persistent data
+        if hasattr(self.bot, 'balance_manager'):
+            self.bot.balance_manager.clear_cache()
         self.logger.info(f"LiveStock cog unloaded at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     async def _initialize_view(self):
-        """Initialize stock view"""
+        """Initialize stock view with persistent data"""
         await self.bot.wait_until_ready()
-        if not hasattr(self.bot, 'stock_view_initialized'):
-            self.stock_view = StockView(self.bot)
-            self.bot.stock_view_initialized = True
-            self.live_stock.start()
-            self.logger.info(f"StockView initialized at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        try:
+            if not hasattr(self.bot, 'stock_view_initialized'):
+                self.stock_view = StockView(self.bot)
+                self.bot.add_view(self.stock_view)  # Make view persistent
+                self.bot.stock_view_initialized = True
+                # Initialize balance manager if not exists
+                if not hasattr(self.bot, 'balance_manager'):
+                    self.bot.balance_manager = BalanceManagerService(self.bot)
+                self.live_stock.start()
+                self.logger.info(f"StockView initialized at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        except Exception as e:
+            self.logger.error(f"Error initializing view: {e}")
+            raise
 
     @tasks.loop(seconds=UPDATE_INTERVAL)
     async def live_stock(self):
@@ -557,13 +572,24 @@ class LiveStock(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         """Handler for when bot is ready"""
-        if self.stock_view:
-            self.bot.add_view(self.stock_view)
-        self.logger.info(f"LiveStock is ready at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        try:
+            if self.stock_view:
+                self.bot.add_view(self.stock_view)
+            # Ensure balance manager is initialized
+            if not hasattr(self.bot, 'balance_manager'):
+                self.bot.balance_manager = BalanceManagerService(self.bot)
+            # Clear cache on ready to ensure fresh data
+            self.bot.balance_manager.clear_cache()
+            self.logger.info(f"LiveStock is ready at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        except Exception as e:
+            self.logger.error(f"Error in on_ready: {e}")
 
 async def setup(bot):
     """Setup the LiveStock cog"""
     if not hasattr(bot, 'live_stock_loaded'):
         await bot.add_cog(LiveStock(bot))
         bot.live_stock_loaded = True
+        # Initialize balance manager if not exists
+        if not hasattr(bot, 'balance_manager'):
+            bot.balance_manager = BalanceManagerService(bot)
         logging.info(f'LiveStock cog loaded successfully at {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC')
