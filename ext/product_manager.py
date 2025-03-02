@@ -373,7 +373,37 @@ class ProductManagerService:
         finally:
             if conn:
                 conn.close()
-
+                
+    async def get_world_info(self) -> Optional[Dict]:
+        """Get current world information"""
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT world, owner, bot, updated_at
+                FROM world_info
+                WHERE id = 1
+            """)
+            
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'world': result['world'],
+                    'owner': result['owner'],
+                    'bot': result['bot'],
+                    'updated_at': result['updated_at']
+                }
+            return None
+    
+        except Exception as e:
+            self.logger.error(f"Error getting world info: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
+            
 class ProductManager(commands.Cog):
     """Cog for product management commands"""
     def __init__(self, bot):
