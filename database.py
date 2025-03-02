@@ -46,7 +46,7 @@ def setup_database():
             )
         """)
 
-        # Create user_growid table (maintaining old name for compatibility)
+        # Create user_discord mapping table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_growid (
                 discord_id TEXT PRIMARY KEY,
@@ -78,7 +78,7 @@ def setup_database():
                 added_by TEXT NOT NULL,
                 buyer_id TEXT,
                 seller_id TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (product_code) REFERENCES products(code) ON DELETE CASCADE
             )
@@ -111,6 +111,26 @@ def setup_database():
             )
         """)
 
+        # Create bot_settings table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create blacklist table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS blacklist (
+                growid TEXT PRIMARY KEY,
+                added_by TEXT NOT NULL,
+                reason TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (growid) REFERENCES users(growid) ON DELETE CASCADE
+            )
+        """)
+
         # Create triggers
         triggers = [
             ("""
@@ -136,6 +156,14 @@ def setup_database():
                 UPDATE stock SET updated_at = CURRENT_TIMESTAMP
                 WHERE id = NEW.id;
             END;
+            """),
+            ("""
+            CREATE TRIGGER IF NOT EXISTS update_bot_settings_timestamp 
+            AFTER UPDATE ON bot_settings
+            BEGIN
+                UPDATE bot_settings SET updated_at = CURRENT_TIMESTAMP
+                WHERE key = NEW.key;
+            END;
             """)
         ]
 
@@ -150,7 +178,8 @@ def setup_database():
             ("idx_stock_status", "stock(status)"),
             ("idx_stock_content", "stock(content)"),
             ("idx_transactions_growid", "transactions(growid)"),
-            ("idx_transactions_created", "transactions(created_at)")
+            ("idx_transactions_created", "transactions(created_at)"),
+            ("idx_blacklist_growid", "blacklist(growid)")
         ]
 
         for idx_name, idx_cols in indexes:
@@ -161,17 +190,6 @@ def setup_database():
             INSERT OR IGNORE INTO world_info (id, world, owner, bot)
             VALUES (1, 'YOURWORLD', 'OWNER', 'BOT')
         """)
-
-        # Verify tables exist
-        tables_to_verify = [
-            'users', 'user_growid', 'products', 'stock', 
-            'transactions', 'world_info'
-        ]
-        
-        for table in tables_to_verify:
-            cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-            if not cursor.fetchone():
-                raise sqlite3.Error(f"Failed to create table: {table}")
 
         conn.commit()
         logger.info("Database setup completed successfully")
@@ -195,7 +213,7 @@ def verify_database():
         # Check all tables exist
         tables = [
             'users', 'user_growid', 'products', 'stock', 
-            'transactions', 'world_info'
+            'transactions', 'world_info', 'bot_settings', 'blacklist'
         ]
 
         missing_tables = []
