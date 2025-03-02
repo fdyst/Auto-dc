@@ -133,23 +133,22 @@ class BuyModal(ui.Modal, title="Buy Product"):
         max_length=2,
         required=True
     )
-
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
-            
+    
             # Get user's GrowID
             growid = await self.balance_manager.get_growid(interaction.user.id)
             if not growid:
                 await interaction.followup.send("❌ Please set your GrowID first!", ephemeral=True)
                 return
-
+    
             # Validate product
             product = await self.product_manager.get_product(self.code.value.upper())
             if not product:
                 await interaction.followup.send("❌ Invalid product code!", ephemeral=True)
                 return
-
+    
             # Validate quantity
             try:
                 quantity = int(self.quantity.value)
@@ -158,35 +157,78 @@ class BuyModal(ui.Modal, title="Buy Product"):
             except ValueError:
                 await interaction.followup.send("❌ Invalid quantity!", ephemeral=True)
                 return
-
+    
             # Process purchase
-            try:
-                result = await self.trx_manager.process_purchase(
-                    growid=growid,
-                    product_code=self.code.value.upper(),
-                    quantity=quantity
+            result = await self.trx_manager.process_purchase(
+                growid=growid,
+                product_code=self.code.value.upper(),
+                quantity=quantity
+            )
+    
+            embed = discord.Embed(
+                title="✅ Purchase Successful",
+                color=discord.Color.green(),
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Product", value=f"`{result['product_name']}`", inline=True)
+            embed.add_field(name="Quantity", value=str(quantity), inline=True)
+            embed.add_field(name="Total Price", value=f"{result['total_price']:,} WL", inline=True)
+            embed.add_field(name="New Balance", value=f"{result['new_balance']:,} WL", inline=False)
+    
+            # Kirim hasil pembelian via DM dalam bentuk txt
+            dm_sent = await self.trx_manager.send_purchase_result(
+                user=interaction.user,
+                items=result['items'],
+                product_name=result['product_name']
+            )
+    
+            if dm_sent:
+                embed.add_field(
+                    name="Purchase Details",
+                    value="✉️ Check your DM for the detailed purchase result!",
+                    inline=False
                 )
-
-                embed = discord.Embed(
-                    title="✅ Purchase Successful",
-                    color=discord.Color.green(),
-                    timestamp=datetime.utcnow()
+            else:
+                embed.add_field(
+                    name="Purchase Details",
+                    value="⚠️ Could not send DM. Please enable DMs from server members to receive purchase details.",
+                    inline=False
                 )
-                embed.add_field(name="Product", value=f"`{product['name']}`", inline=True)
-                embed.add_field(name="Quantity", value=str(quantity), inline=True)
-                embed.add_field(name="Total Price", value=f"{result['total_price']:,} WL", inline=True)
-                embed.add_field(name="New Balance", value=f"{result['new_balance']:,} WL", inline=False)
-
-                content_msg = "**Your Items:**\n"
-                for item in result['items']:
-                    content_msg += f"```{item['content']}```\n"
-
-                await interaction.followup.send(embed=embed, content=content_msg, ephemeral=True)
-
-            except Exception as e:
-                error_msg = str(e) if str(e) else "An error occurred during purchase"
-                await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
-
+    
+            # Tampilkan items di channel jika DM gagal
+            content_msg = "**Your Items:**\n"
+            for item in result['items']:
+                content_msg += f"```{item['content']}```\n"
+    
+            await interaction.followup.send(
+                embed=embed,
+                content=content_msg if not dm_sent else None,
+                ephemeral=True
+            )
+    
+        except Exception as e:
+            error_msg = str(e) if str(e) else "An error occurred during purchase"
+            await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
+    
+        except Exception as e:
+            self.logger.error(f"Error in BuyModal: {e}")
+            await interaction.followup.send("❌ An error occurred", ephemeral=True)
+    
+            # Tampilkan items di channel jika DM gagal
+            content_msg = "**Your Items:**\n"
+            for item in result['items']:
+                content_msg += f"```{item['content']}```\n"
+    
+            await interaction.followup.send(
+                embed=embed,
+                content=content_msg if not dm_sent else None,
+                ephemeral=True
+            )
+    
+        except Exception as e:
+            error_msg = str(e) if str(e) else "An error occurred during purchase"
+            await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
+    
         except Exception as e:
             self.logger.error(f"Error in BuyModal: {e}")
             await interaction.followup.send("❌ An error occurred", ephemeral=True)
