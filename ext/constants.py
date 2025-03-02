@@ -134,3 +134,28 @@ PAGINATION_EMOJIS = {
 # Transaction Settings
 MIN_TRANSACTION_AMOUNT = 1
 MAX_TRANSACTION_AMOUNT = 1000000  # 1M WLs
+
+class Balance:
+    def __init__(self, wl: int = 0, dl: int = 0, bgl: int = 0):
+        self.wl = wl
+        self.dl = dl
+        self.bgl = bgl
+        self.total_wls = self.to_wls()
+    
+    def format(self) -> str:
+        """Format balance in human readable string"""
+        parts = []
+        if self.bgl > 0:
+            parts.append(f"{self.bgl:,} BGL")
+        if self.dl > 0:
+            parts.append(f"{self.dl:,} DL")
+        if self.wl > 0:
+            parts.append(f"{self.wl:,} WL")
+        
+        if not parts:
+            return "0 WL"
+        return " + ".join(parts)
+        
+    def to_wls(self) -> int:
+        """Convert balance to total WLs"""
+        return self.wl + (self.dl * 100) + (self.bgl * 10000)
