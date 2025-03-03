@@ -29,11 +29,14 @@ logger = logging.getLogger(__name__)
 def load_config():
     required_keys = {
         'token': str,
-        'guild_id': (int, str),  # Bisa int atau string
+        'guild_id': (int, str),
         'admin_id': (int, str),
         'id_live_stock': (int, str),
         'id_log_purch': (int, str),
-        'id_donation_log': (int, str)
+        'id_donation_log': (int, str),
+        'id_history_buy': (int, str),
+        'channels': dict,
+        'roles': dict
     }
     
     try:
@@ -73,6 +76,46 @@ ADMIN_ID = int(config['admin_id'])
 LIVE_STOCK_CHANNEL_ID = int(config['id_live_stock'])
 LOG_PURCHASE_CHANNEL_ID = int(config['id_log_purch'])
 DONATION_LOG_CHANNEL_ID = int(config['id_donation_log'])
+HISTORY_BUY_CHANNEL_ID = int(config['id_history_buy'])
+
+class HelpCommand(commands.HelpCommand):
+    """Custom help command implementation"""
+    
+    async def send_bot_help(self, mapping):
+        embed = discord.Embed(title="📚 Bot Commands", color=discord.Color.blue())
+        
+        # Sort cogs by name
+        sorted_mapping = sorted(mapping.items(), key=lambda x: x[0].qualified_name if x[0] else "No Category")
+        
+        for cog, commands in sorted_mapping:
+            if not cog or not commands:
+                continue
+                
+            # Filter commands user can use
+            filtered = await self.filter_commands(commands, sort=True)
+            if filtered:
+                # Get cog description and emoji
+                description = cog.description or "No description"
+                
+                # Add field for each cog
+                command_list = "\n".join(f"`{cmd.name}` - {cmd.short_doc}" for cmd in filtered)
+                embed.add_field(name=description, value=command_list, inline=False)
+        
+        embed.set_footer(text="Use !help <command> for more details about a command")
+        await self.get_destination().send(embed=embed)
+
+    async def send_command_help(self, command):
+        embed = discord.Embed(
+            title=f"Command: {command.name}",
+            description=command.help or "No description available",
+            color=discord.Color.blue()
+        )
+        
+        if command.aliases:
+            embed.add_field(name="Aliases", value=", ".join(command.aliases), inline=False)
+            
+        embed.add_field(name="Usage", value=f"`!{command.name} {command.signature}`", inline=False)
+        await self.get_destination().send(embed=embed)
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -80,7 +123,7 @@ class MyBot(commands.Bot):
         super().__init__(
             command_prefix='!',
             intents=intents,
-            help_command=None
+            help_command=HelpCommand()
         )
         self.session = None
         self.admin_id = ADMIN_ID
@@ -88,9 +131,10 @@ class MyBot(commands.Bot):
         self.live_stock_channel_id = LIVE_STOCK_CHANNEL_ID
         self.log_purchase_channel_id = LOG_PURCHASE_CHANNEL_ID
         self.donation_log_channel_id = DONATION_LOG_CHANNEL_ID
+        self.history_buy_channel_id = HISTORY_BUY_CHANNEL_ID
+        self.config = config
         self.startup_time = datetime.utcnow()
 
-# Di dalam MyBot class
     async def setup_hook(self):
         """Initialize bot components"""
         self.session = aiohttp.ClientSession()
@@ -102,7 +146,17 @@ class MyBot(commands.Bot):
             'ext.trx',
             'ext.donate',
             'ext.balance_manager',
-            'ext.product_manager'
+            'ext.product_manager',
+            # New cogs
+            'cogs.polls',
+            'cogs.music',
+            'cogs.stats',
+            'cogs.automod',
+            'cogs.tickets',
+            'cogs.welcome',
+            'cogs.giveaway',
+            'cogs.leveling',
+            'cogs.reminders'
         ]
         
         loaded_extensions = set()  # Track loaded extensions
@@ -140,7 +194,8 @@ class MyBot(commands.Bot):
         channels = {
             'Live Stock': self.live_stock_channel_id,
             'Purchase Log': self.log_purchase_channel_id,
-            'Donation Log': self.donation_log_channel_id
+            'Donation Log': self.donation_log_channel_id,
+            'History Buy': self.history_buy_channel_id
         }
 
         for name, channel_id in channels.items():
@@ -166,7 +221,8 @@ class MyBot(commands.Bot):
         if message.channel.id in [
             self.live_stock_channel_id,
             self.log_purchase_channel_id,
-            self.donation_log_channel_id
+            self.donation_log_channel_id,
+            self.history_buy_channel_id
         ]:
             logger.info(
                 f'Channel {message.channel.name}: '
