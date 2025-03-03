@@ -131,6 +131,50 @@ def setup_database():
             )
         """)
 
+        # Create admin_logs table (NEW)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create role_permissions table (NEW)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_id TEXT PRIMARY KEY,
+                permissions TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create user_activity table (NEW)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id TEXT NOT NULL,
+                activity_type TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (discord_id) REFERENCES user_growid(discord_id)
+            )
+        """)
+
+        # Create cache_table (NEW)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cache_table (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Create triggers
         triggers = [
             ("""
@@ -164,6 +208,15 @@ def setup_database():
                 UPDATE bot_settings SET updated_at = CURRENT_TIMESTAMP
                 WHERE key = NEW.key;
             END;
+            """),
+            # New trigger for role_permissions
+            ("""
+            CREATE TRIGGER IF NOT EXISTS update_role_permissions_timestamp 
+            AFTER UPDATE ON role_permissions
+            BEGIN
+                UPDATE role_permissions SET updated_at = CURRENT_TIMESTAMP
+                WHERE role_id = NEW.role_id;
+            END;
             """)
         ]
 
@@ -179,7 +232,14 @@ def setup_database():
             ("idx_stock_content", "stock(content)"),
             ("idx_transactions_growid", "transactions(growid)"),
             ("idx_transactions_created", "transactions(created_at)"),
-            ("idx_blacklist_growid", "blacklist(growid)")
+            ("idx_blacklist_growid", "blacklist(growid)"),
+            # New indexes
+            ("idx_admin_logs_admin", "admin_logs(admin_id)"),
+            ("idx_admin_logs_created", "admin_logs(created_at)"),
+            ("idx_user_activity_discord", "user_activity(discord_id)"),
+            ("idx_user_activity_type", "user_activity(activity_type)"),
+            ("idx_role_permissions_role", "role_permissions(role_id)"),
+            ("idx_cache_expires", "cache_table(expires_at)")
         ]
 
         for idx_name, idx_cols in indexes:
@@ -189,6 +249,12 @@ def setup_database():
         cursor.execute("""
             INSERT OR IGNORE INTO world_info (id, world, owner, bot)
             VALUES (1, 'YOURWORLD', 'OWNER', 'BOT')
+        """)
+
+        # Insert default role permissions if not exists
+        cursor.execute("""
+            INSERT OR IGNORE INTO role_permissions (role_id, permissions)
+            VALUES ('admin', 'all')
         """)
 
         conn.commit()
@@ -213,7 +279,8 @@ def verify_database():
         # Check all tables exist
         tables = [
             'users', 'user_growid', 'products', 'stock', 
-            'transactions', 'world_info', 'bot_settings', 'blacklist'
+            'transactions', 'world_info', 'bot_settings', 'blacklist',
+            'admin_logs', 'role_permissions', 'user_activity', 'cache_table'
         ]
 
         missing_tables = []
@@ -230,6 +297,10 @@ def verify_database():
         cursor.execute("PRAGMA integrity_check")
         if cursor.fetchone()['integrity_check'] != 'ok':
             raise sqlite3.Error("Database integrity check failed")
+
+        # Clean expired cache entries
+        cursor.execute("DELETE FROM cache_table WHERE expires_at < CURRENT_TIMESTAMP")
+        conn.commit()
 
         logger.info("Database verification completed successfully")
         return True
