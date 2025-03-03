@@ -1,109 +1,202 @@
 import discord
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import io
 import aiohttp
-import os
 from datetime import datetime
+from typing import Optional
+from .utils import Embed, db, event_dispatcher
 
 class Welcome(commands.Cog):
     """👋 Sistem Welcome Advanced"""
     
     def __init__(self, bot):
         self.bot = bot
-        self.font_path = "assets/fonts/"  # Pastikan folder dan font tersedia
+        self.font_path = "assets/fonts/"
         self.background_path = "assets/backgrounds/"
+        self.register_handlers()
         
-    async def create_welcome_card(self, member):
-        """Buat kartu welcome dengan gambar"""
+    async def setup_tables(self):
+        """Setup necessary database tables"""
+        async with db.pool.cursor() as cursor:
+            # Welcome settings table
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS welcome_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    channel_id TEXT,
+                    message TEXT,
+                    embed_color INTEGER DEFAULT 3447003,
+                    auto_role_id TEXT,
+                    verification_required BOOLEAN DEFAULT FALSE,
+                    custom_background TEXT,
+                    custom_font TEXT
+                )
+            """)
+            
+            # Welcome logs
+            await cursor.execute("""
+                CREATE TABLE IF NOT EXISTS welcome_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    action_type TEXT NOT NULL
+                )
+            """)
+            
+            await db.pool.commit()
+
+    def register_handlers(self):
+        """Register event handlers"""
+        event_dispatcher.register('member_join', self.handle_member_join)
+        event_dispatcher.register('reaction_add', self.handle_verification)
+
+    async def get_guild_settings(self, guild_id: int) -> dict:
+        """Get welcome settings for a guild"""
+        async with db.pool.cursor() as cursor:
+            await cursor.execute("""
+                SELECT * FROM welcome_settings WHERE guild_id = ?
+            """, (str(guild_id),))
+            data = await cursor.fetchone()
+            
+            if not data:
+                return {
+                    'channel_id': None,
+                    'message': 'Welcome {user} to {server}!',
+                    'embed_color': 3447003,
+                    'auto_role_id': None,
+                    'verification_required': False,
+                    'custom_background': None,
+                    'custom_font': None
+                }
+                
+            return dict(data)
+
+    async def create_welcome_card(self, member: discord.Member, settings: dict) -> io.BytesIO:
+        """Create a customized welcome card"""
         # Load background
-        background = Image.open(f"{self.background_path}welcome_bg.png")
+        if settings['custom_background']:
+            background = Image.open(f"{self.background_path}{settings['custom_background']}")
+        else:
+            background = Image.open(f"{self.background_path}welcome_bg.png")
+            
+        # Apply blur effect to background
+        background = background.filter(ImageFilter.GaussianBlur(5))
+        
+        # Create drawing context
         draw = ImageDraw.Draw(background)
         
         # Load fonts
-        title_font = ImageFont.truetype(f"{self.font_path}title.ttf", 60)
-        subtitle_font = ImageFont.truetype(f"{self.font_path}subtitle.ttf", 40)
+        title_font = ImageFont.truetype(
+            f"{self.font_path}{settings.get('custom_font', 'title.ttf')}", 
+            60
+        )
+        subtitle_font = ImageFont.truetype(
+            f"{self.font_path}{settings.get('custom_font', 'subtitle.ttf')}", 
+            40
+        )
         
-        # Download dan pasang avatar
+        # Download and process avatar
         async with aiohttp.ClientSession() as session:
             async with session.get(str(member.display_avatar.url)) as resp:
                 avatar_bytes = await resp.read()
                 
-        # Proses avatar
         with Image.open(io.BytesIO(avatar_bytes)) as avatar:
-            avatar = avatar.resize((200, 200))
+            # Create circular mask
             mask = Image.new("L", avatar.size, 0)
             draw_mask = ImageDraw.Draw(mask)
-            draw_mask.ellipse((0, 0, 200, 200), fill=255)
+            draw_mask.ellipse((0, 0, *avatar.size), fill=255)
             
-            # Paste avatar
-            background.paste(avatar, (350, 50), mask)
+            # Apply mask and resize
+            avatar = avatar.resize((200, 200))
+            mask = mask.resize((200, 200))
             
-        # Tambah text
-        draw.text(
-            (450, 280),
+            # Create circular border
+            border = Image.new("RGBA", (220, 220), (255, 255, 255, 0))
+            draw_border = ImageDraw.Draw(border)
+            draw_border.ellipse((0, 0, 219, 219), outline=(255, 255, 255, 255), width=3)
+            
+            # Composite images
+            background.paste(avatar, (340, 50), mask)
+            background.paste(border, (330, 40), border)
+            
+        # Add text with shadow effect
+        def draw_text_with_shadow(text, position, font, fill, shadow_color=(0, 0, 0)):
+            # Draw shadow
+            draw.text((position[0]+2, position[1]+2), text, font=font, fill=shadow_color)
+            # Draw main text
+            draw.text(position, text, font=font, fill=fill)
+            
+        # Welcome text
+        draw_text_with_shadow(
             f"Welcome {member.name}!",
-            font=title_font,
-            fill="white",
-            anchor="ms"
-        )
-        draw.text(
-            (450, 340),
-            f"Member #{len(member.guild.members)}",
-            font=subtitle_font,
-            fill="lightgray",
-            anchor="ms"
+            (450, 280),
+            title_font,
+            "white"
         )
         
-        # Convert ke bytes
+        # Member count
+        draw_text_with_shadow(
+            f"Member #{len(member.guild.members)}",
+            (450, 340),
+            subtitle_font,
+            "lightgray"
+        )
+        
+        # Server name
+        draw_text_with_shadow(
+            member.guild.name,
+            (450, 400),
+            subtitle_font,
+            "white"
+        )
+        
+        # Convert to bytes
         buffer = io.BytesIO()
         background.save(buffer, format="PNG")
         buffer.seek(0)
         
         return buffer
+
+    async def handle_member_join(self, member: discord.Member):
+        """Handle new member joins"""
+        settings = await self.get_guild_settings(member.guild.id)
         
-    @commands.Cog.listener()
-    async def on_member_join(self, member):
-        """Handle member join dengan welcome card"""
-        # Get welcome channel
-        channel_id = self.bot.config['channels'].get('welcome')
-        if not channel_id:
+        if not settings['channel_id']:
             return
             
-        channel = self.bot.get_channel(int(channel_id))
+        channel = self.bot.get_channel(int(settings['channel_id']))
         if not channel:
             return
             
         # Create welcome card
-        card_buffer = await self.create_welcome_card(member)
+        card_buffer = await self.create_welcome_card(member, settings)
         
         # Create embed
-        embed = discord.Embed(
+        embed = Embed.create(
             title="👋 Welcome to the Server!",
-            description=f"Selamat datang {member.mention} di {member.guild.name}!",
-            color=discord.Color.green(),
-            timestamp=datetime.utcnow()
+            description=settings['message'].format(
+                user=member.mention,
+                server=member.guild.name
+            ),
+            color=settings['embed_color'],
+            field_Account_Created={
+                "value": f"<t:{int(member.created_at.timestamp())}:R>",
+                "inline": True
+            },
+            field_Member_Count={
+                "value": str(len(member.guild.members)),
+                "inline": True
+            }
         )
         
-        # Add member info
-        embed.add_field(
-            name="Account Created",
-            value=f"<t:{int(member.created_at.timestamp())}:R>",
-            inline=True
-        )
-        embed.add_field(
-            name="Member Count",
-            value=str(len(member.guild.members)),
-            inline=True
-        )
-        
-        # Add rules reminder
-        embed.add_field(
-            name="📜 Please Read",
-            value="Jangan lupa baca rules di <#rules_channel_id>",
-            inline=False
-        )
-        
+        if settings['verification_required']:
+            embed.add_field(
+                name="✅ Verification",
+                value="Please react with ✅ to gain access to the server",
+                inline=False
+            )
+            
         # Send welcome message
         file = discord.File(card_buffer, "welcome.png")
         embed.set_image(url="attachment://welcome.png")
@@ -114,65 +207,125 @@ class Welcome(commands.Cog):
             file=file
         )
         
-        # Add reaction for role
-        await welcome_msg.add_reaction("✅")
-        
-    @commands.Cog.listener()
-    async def on_raw_reaction_add(self, payload):
-        """Handle reaction untuk auto-role"""
-        if payload.member.bot:
-            return
+        # Add verification reaction if required
+        if settings['verification_required']:
+            await welcome_msg.add_reaction("✅")
             
-        channel_id = self.bot.config['channels'].get('welcome')
-        if not channel_id or payload.channel_id != int(channel_id):
-            return
-            
-        if str(payload.emoji) == "✅":
-            # Get verified role
-            role_id = self.bot.config['roles'].get('verified')
-            if not role_id:
-                return
-                
-            role = payload.member.guild.get_role(int(role_id))
+        # Add auto role if configured
+        if settings['auto_role_id'] and not settings['verification_required']:
+            role = member.guild.get_role(int(settings['auto_role_id']))
             if role:
-                await payload.member.add_roles(role)
-                
+                try:
+                    await member.add_roles(role)
+                except discord.Forbidden:
+                    pass
+                    
+        # Log welcome
+        await self.log_welcome(member.guild.id, member.id, 'join')
+
+    async def handle_verification(self, payload):
+        """Handle verification reactions"""
+        if str(payload.emoji) != "✅":
+            return
+            
+        settings = await self.get_guild_settings(payload.guild_id)
+        if not settings['verification_required']:
+            return
+            
+        if not settings['auto_role_id']:
+            return
+            
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+            
+        member = guild.get_member(payload.user_id)
+        if not member or member.bot:
+            return
+            
+        role = guild.get_role(int(settings['auto_role_id']))
+        if role:
+            try:
+                await member.add_roles(role)
+                await self.log_welcome(guild.id, member.id, 'verify')
+            except discord.Forbidden:
+                pass
+
+    async def log_welcome(self, guild_id: int, user_id: int, action_type: str):
+        """Log welcome events"""
+        async with db.pool.cursor() as cursor:
+            await cursor.execute("""
+                INSERT INTO welcome_logs (guild_id, user_id, action_type)
+                VALUES (?, ?, ?)
+            """, (str(guild_id), str(user_id), action_type))
+            await db.pool.commit()
+
     @commands.group(name="welcome")
     @commands.has_permissions(administrator=True)
     async def welcome(self, ctx):
-        """⚙️ Pengaturan welcome system"""
+        """⚙️ Welcome system settings"""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
-            
-    @welcome.command(name="test")
-    async def test_welcome(self, ctx):
-        """Test welcome message"""
-        card_buffer = await self.create_welcome_card(ctx.author)
-        
-        embed = discord.Embed(
-            title="👋 Welcome Message Test",
-            description=f"This is how the welcome message will look for new members.",
-            color=discord.Color.blue()
-        )
-        
-        file = discord.File(card_buffer, "welcome_test.png")
-        embed.set_image(url="attachment://welcome_test.png")
-        
-        await ctx.send(embed=embed, file=file)
-        
+
     @welcome.command(name="setchannel")
     async def set_welcome_channel(self, ctx, channel: discord.TextChannel):
         """Set welcome channel"""
-        self.bot.config['channels']['welcome'] = channel.id
-        await self.bot.save_config()
+        async with db.pool.cursor() as cursor:
+            await cursor.execute("""
+                INSERT OR REPLACE INTO welcome_settings 
+                (guild_id, channel_id) VALUES (?, ?)
+            """, (str(ctx.guild.id), str(channel.id)))
+            await db.pool.commit()
+            
         await ctx.send(f"✅ Welcome channel set to {channel.mention}")
-        
+
+    @welcome.command(name="setmessage")
+    async def set_welcome_message(self, ctx, *, message: str):
+        """Set custom welcome message"""
+        async with db.pool.cursor() as cursor:
+            await cursor.execute("""
+                INSERT OR REPLACE INTO welcome_settings 
+                (guild_id, message) VALUES (?, ?)
+            """, (str(ctx.guild.id), message))
+            await db.pool.commit()
+            
+        await ctx.send("✅ Welcome message updated!")
+
     @welcome.command(name="setrole")
-    async def set_verified_role(self, ctx, role: discord.Role):
-        """Set verified role"""
-        self.bot.config['roles']['verified'] = role.id
-        await self.bot.save_config()
-        await ctx.send(f"✅ Verified role set to {role.mention}")
+    async def set_auto_role(self, ctx, role: discord.Role):
+        """Set auto-role for new members"""
+        async with db.pool.cursor() as cursor:
+            await cursor.execute("""
+                INSERT OR REPLACE INTO welcome_settings 
+                (guild_id, auto_role_id) VALUES (?, ?)
+            """, (str(ctx.guild.id), str(role.id)))
+            await db.pool.commit()
+            
+        await ctx.send(f"✅ Auto-role set to {role.mention}")
+
+    @welcome.command(name="toggleverify")
+    async def toggle_verification(self, ctx):
+        """Toggle verification requirement"""
+        settings = await self.get_guild_settings(ctx.guild.id)
+        new_state = not settings['verification_required']
+        
+        async with db.pool.cursor() as cursor:
+            await cursor.execute("""
+                INSERT OR REPLACE INTO welcome_settings 
+                (guild_id, verification_required) VALUES (?, ?)
+            """, (str(ctx.guild.id), new_state))
+            await db.pool.commit()
+            
+        await ctx.send(f"✅ Verification requirement {'enabled' if new_state else 'disabled'}")
+
+    @welcome.command(name="test")
+    async def test_welcome(self, ctx):
+        """Test welcome message"""
+        await self.handle_member_join(ctx.author)
+        await ctx.send("✅ Test welcome message sent!")
 
 async def setup(bot):
-    await bot.add_cog(Welcome(bot))
+    """Setup the Welcome cog"""
+    cog = Welcome(bot)
+    await cog.setup_tables()
+    await bot.add_cog(cog)
