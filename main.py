@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 from database import setup_database, get_connection
 from datetime import datetime
+from utils.command_handler import AdvancedCommandHandler
 
 # Setup logging dengan file handler
 log_dir = Path('logs')
@@ -36,7 +37,10 @@ def load_config():
         'id_donation_log': (int, str),
         'id_history_buy': (int, str),
         'channels': dict,
-        'roles': dict
+        'roles': dict,
+        'cooldowns': dict,
+        'permissions': dict,
+        'rate_limits': dict
     }
     
     try:
@@ -78,52 +82,13 @@ LOG_PURCHASE_CHANNEL_ID = int(config['id_log_purch'])
 DONATION_LOG_CHANNEL_ID = int(config['id_donation_log'])
 HISTORY_BUY_CHANNEL_ID = int(config['id_history_buy'])
 
-class HelpCommand(commands.HelpCommand):
-    """Custom help command implementation"""
-    
-    async def send_bot_help(self, mapping):
-        embed = discord.Embed(title="📚 Bot Commands", color=discord.Color.blue())
-        
-        # Sort cogs by name
-        sorted_mapping = sorted(mapping.items(), key=lambda x: x[0].qualified_name if x[0] else "No Category")
-        
-        for cog, commands in sorted_mapping:
-            if not cog or not commands:
-                continue
-                
-            # Filter commands user can use
-            filtered = await self.filter_commands(commands, sort=True)
-            if filtered:
-                # Get cog description and emoji
-                description = cog.description or "No description"
-                
-                # Add field for each cog
-                command_list = "\n".join(f"`{cmd.name}` - {cmd.short_doc}" for cmd in filtered)
-                embed.add_field(name=description, value=command_list, inline=False)
-        
-        embed.set_footer(text="Use !help <command> for more details about a command")
-        await self.get_destination().send(embed=embed)
-
-    async def send_command_help(self, command):
-        embed = discord.Embed(
-            title=f"Command: {command.name}",
-            description=command.help or "No description available",
-            color=discord.Color.blue()
-        )
-        
-        if command.aliases:
-            embed.add_field(name="Aliases", value=", ".join(command.aliases), inline=False)
-            
-        embed.add_field(name="Usage", value=f"`!{command.name} {command.signature}`", inline=False)
-        await self.get_destination().send(embed=embed)
-
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(
             command_prefix='!',
             intents=intents,
-            help_command=HelpCommand()
+            help_command=commands.DefaultHelpCommand()
         )
         self.session = None
         self.admin_id = ADMIN_ID
@@ -134,6 +99,7 @@ class MyBot(commands.Bot):
         self.history_buy_channel_id = HISTORY_BUY_CHANNEL_ID
         self.config = config
         self.startup_time = datetime.utcnow()
+        self.command_handler = AdvancedCommandHandler(self)
 
     async def setup_hook(self):
         """Initialize bot components"""
@@ -169,7 +135,9 @@ class MyBot(commands.Bot):
                     logger.info(f'✅ Loaded extension: {ext}')
             except Exception as e:
                 logger.error(f'❌ Failed to load {ext}: {e}')
-                raise  # Re-raise to prevent partial initialization
+                # Log detailed error info
+                logger.exception(f"Detailed error loading {ext}:")
+                continue  # Continue loading other extensions
 
     async def close(self):
         """Cleanup when bot shuts down"""
@@ -195,13 +163,17 @@ class MyBot(commands.Bot):
             'Live Stock': self.live_stock_channel_id,
             'Purchase Log': self.log_purchase_channel_id,
             'Donation Log': self.donation_log_channel_id,
-            'History Buy': self.history_buy_channel_id
+            'History Buy': self.history_buy_channel_id,
+            'Music': int(self.config['channels']['music']),
+            'Logs': int(self.config['channels']['logs'])
         }
 
         for name, channel_id in channels.items():
             channel = guild.get_channel(channel_id)
             if not channel:
                 logger.error(f"Could not find {name} channel with ID {channel_id}")
+            else:
+                logger.info(f"✅ Found {name} channel: {channel.name}")
 
         # Set custom status
         await self.change_presence(
@@ -231,21 +203,35 @@ class MyBot(commands.Bot):
 
         await self.process_commands(message)
 
+    async def on_command(self, ctx):
+        """Event when command is triggered"""
+        try:
+            await self.command_handler.handle_command(
+                ctx, 
+                ctx.command.name,
+                *ctx.args[2:],
+                **ctx.kwargs
+            )
+        except Exception as e:
+            logger.error(f"Command handling error: {e}")
+            logger.exception("Detailed command handling error:")
+
     async def on_command_error(self, ctx, error):
         """Global error handler"""
         if isinstance(error, commands.errors.CheckFailure):
-            await ctx.send("❌ You don't have permission to use this command!")
+            await ctx.send("❌ You don't have permission to use this command!", delete_after=5)
         elif isinstance(error, commands.errors.CommandNotFound):
             pass  # Ignore command not found
         elif isinstance(error, commands.errors.MissingRequiredArgument):
-            await ctx.send(f"❌ Missing required argument: {error.param.name}")
+            await ctx.send(f"❌ Missing required argument: {error.param.name}", delete_after=5)
         elif isinstance(error, commands.errors.BadArgument):
-            await ctx.send("❌ Invalid argument provided!")
+            await ctx.send("❌ Invalid argument provided!", delete_after=5)
         else:
             error_msg = f'Error in command {ctx.command}: {error}'
             logger.error(error_msg)
             await ctx.send(
-                "❌ An error occurred! The administrator has been notified."
+                "❌ An error occurred! The administrator has been notified.",
+                delete_after=5
             )
             
             # Notify admin if serious error
@@ -253,6 +239,24 @@ class MyBot(commands.Bot):
                 admin = self.get_user(self.admin_id)
                 if admin:
                     await admin.send(f"⚠️ Bot Error:\n```{error_msg}```")
+
+    async def on_guild_join(self, guild):
+        """Event when bot joins a new guild"""
+        logger.info(f"Bot joined new guild: {guild.name} (ID: {guild.id})")
+        if guild.id != self.guild_id:
+            logger.warning(f"Bot joined unauthorized guild: {guild.name} (ID: {guild.id})")
+            await guild.leave()
+            
+    @commands.is_owner()
+    async def reload_extension(self, ctx, extension):
+        """Reload a specific extension"""
+        try:
+            await self.unload_extension(extension)
+            await self.load_extension(extension)
+            await ctx.send(f"✅ Reloaded extension: {extension}")
+        except Exception as e:
+            await ctx.send(f"❌ Error reloading {extension}: {e}")
+            logger.error(f"Error reloading {extension}: {e}")
 
 bot = MyBot()
 
@@ -268,6 +272,7 @@ async def main():
             await bot.start(TOKEN)
     except Exception as e:
         logger.error(f'Fatal error: {e}')
+        logger.exception("Detailed fatal error:")
         raise
     finally:
         if not bot.is_closed():
@@ -280,3 +285,4 @@ if __name__ == '__main__':
         logger.info('Bot stopped by user')
     except Exception as e:
         logger.error(f'Fatal error occurred: {e}')
+        logger.exception("Detailed fatal error on startup:")
